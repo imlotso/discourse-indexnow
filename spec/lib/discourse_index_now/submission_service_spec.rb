@@ -14,11 +14,11 @@ describe DiscourseIndexNow::SubmissionService do
     SiteSetting.indexnow_submit_on_edit = true
     SiteSetting.login_required = false
     SiteSetting.indexnow_excluded_tag_names = ""
-    Discourse.redis.del(described_class.debounce_key(topic.id))
+    Discourse.redis.del(described_class.debounce_key(topic.url))
     allow(Jobs).to receive(:enqueue)
   end
 
-  after { Discourse.redis.del(described_class.debounce_key(topic.id)) }
+  after { Discourse.redis.del(described_class.debounce_key(topic.url)) }
 
   describe "#handle_post_created" do
     it "creates one log per URL in a localized batch" do
@@ -93,6 +93,94 @@ describe DiscourseIndexNow::SubmissionService do
     end
   end
 
+  describe "replies" do
+    fab!(:reply) { Fabricate(:post, topic: topic, post_number: 2) }
+
+    it "ignores replies by default" do
+      expect { described_class.handle_post_created(reply) }.not_to change(
+        DiscourseIndexNow::SubmissionLog,
+        :count,
+      )
+    end
+
+    it "submits the topic for a reply once enabled" do
+      SiteSetting.indexnow_submit_on_reply = true
+
+      described_class.handle_post_created(reply)
+
+      expect(DiscourseIndexNow::SubmissionLog.pluck(:url)).to contain_exactly(topic.url)
+      expect(DiscourseIndexNow::SubmissionLog.first.trigger_reason).to eq("replied")
+    end
+
+    it "still submits the first post as created, not replied" do
+      SiteSetting.indexnow_submit_on_reply = true
+
+      described_class.handle_post_created(post)
+
+      expect(DiscourseIndexNow::SubmissionLog.first.trigger_reason).to eq("created")
+    end
+  end
+
+  describe "url cooldown" do
+    fab!(:reply) { Fabricate(:post, topic: topic, post_number: 2) }
+
+    before { SiteSetting.indexnow_submit_on_reply = true }
+
+    # Replies to the same crawler page collapse into one submission per window.
+    it "collapses repeated activity on one page into a single submission" do
+      SiteSetting.indexnow_url_cooldown_minutes = 1440
+
+      3.times { described_class.handle_post_created(reply) }
+      described_class.handle_post_edited(post, false)
+
+      expect(DiscourseIndexNow::SubmissionLog.count).to eq(1)
+    end
+
+    # ...but a reply that rolls the topic onto a new crawler page is a new URL,
+    # so it goes out immediately rather than waiting behind the previous page.
+    it "submits a new page straight away while the previous page is cooling down" do
+      SiteSetting.indexnow_url_cooldown_minutes = 1440
+      described_class.handle_post_created(reply)
+
+      later = Fabricate(:post, topic: topic, post_number: TopicView.chunk_size + 5)
+      described_class.handle_post_created(later)
+
+      expect(DiscourseIndexNow::SubmissionLog.order(:id).pluck(:url)).to eq(
+        [topic.url, "#{topic.url}?page=2"],
+      )
+    end
+
+    it "sets the cooldown to the configured length" do
+      SiteSetting.indexnow_url_cooldown_minutes = 1440
+
+      described_class.handle_post_created(reply)
+
+      expect(Discourse.redis.ttl(described_class.debounce_key(topic.url))).to be > 86_000
+    end
+
+    it "does not gate submissions when the cooldown is zero" do
+      SiteSetting.indexnow_url_cooldown_minutes = 0
+      described_class.handle_post_created(reply)
+      # Settle the first log so the pending-URL guard is not what is being measured.
+      DiscourseIndexNow::SubmissionLog.update_all(
+        status: DiscourseIndexNow::SubmissionLog.statuses[:success],
+      )
+
+      described_class.handle_post_created(reply)
+
+      expect(DiscourseIndexNow::SubmissionLog.count).to eq(2)
+    end
+
+    it "lets a deletion through even while the topic is cooling down" do
+      SiteSetting.indexnow_url_cooldown_minutes = 1440
+      described_class.handle_post_created(reply)
+
+      described_class.enqueue_deleted_topic(topic)
+
+      expect(DiscourseIndexNow::SubmissionLog.where(trigger_reason: :deleted)).to be_present
+    end
+  end
+
   describe "#handle_post_edited" do
     it "does not submit ordinary non-first-post edits" do
       reply = Fabricate(:post, topic: topic, post_number: 2)
@@ -118,7 +206,7 @@ describe DiscourseIndexNow::SubmissionService do
       described_class.enqueue(topic)
 
       expect(DiscourseIndexNow::SubmissionLog.count).to eq(1)
-      expect(Discourse.redis.get(described_class.debounce_key(topic.id))).to eq("1")
+      expect(Discourse.redis.get(described_class.debounce_key(topic.url))).to eq("1")
     end
 
     it "skips a topic in a read-restricted category" do
@@ -238,33 +326,95 @@ describe DiscourseIndexNow::SubmissionService do
   end
 
   describe "#handle_category_updated" do
-    it "fails pending logs when a category becomes restricted" do
-      described_class.enqueue(topic)
+    # The fan-out itself is deferred: walking every topic in a category inline would
+    # run inside the admin's own request. The handler's job is only to enqueue.
+    it "defers the fan-out to a background job when a category becomes restricted" do
       category.update!(read_restricted: true)
 
-      expect(DiscourseIndexNow::SubmissionLog.where(url: topic.url)).to all(be_failed)
+      expect(Jobs).to have_received(:enqueue).with(
+        Jobs::DiscourseIndexNow::ResubmitTopics,
+        category_id: category.id,
+        mode: "revoke",
+        trigger_reason: "category_changed",
+      )
     end
 
-    it "enqueues public topics when a category becomes public" do
+    it "defers the fan-out to a background job when a category becomes public" do
       restricted = Fabricate(:category, read_restricted: true)
-      Fabricate(:topic, category: restricted)
       restricted.update!(read_restricted: false)
 
-      expect(DiscourseIndexNow::SubmissionLog.count).to eq(1)
-      expect(DiscourseIndexNow::SubmissionLog.first.trigger_reason).to eq("category_changed")
+      expect(Jobs).to have_received(:enqueue).with(
+        Jobs::DiscourseIndexNow::ResubmitTopics,
+        category_id: restricted.id,
+        mode: "submit",
+        trigger_reason: "category_changed",
+      )
+    end
+
+    it "does not enqueue anything when read_restricted did not change" do
+      category.update!(name: "a different name")
+
+      expect(Jobs).not_to have_received(:enqueue).with(
+        Jobs::DiscourseIndexNow::ResubmitTopics,
+        any_args,
+      )
     end
   end
 
   describe "#handle_tag_updated" do
-    it "resubmits topics carrying the tag" do
+    it "defers the fan-out to a background job" do
+      tag = Fabricate(:tag)
+      tag.update!(name: "renamed-tag")
+
+      expect(Jobs).to have_received(:enqueue).with(
+        Jobs::DiscourseIndexNow::ResubmitTopics,
+        tag_id: tag.id,
+        mode: "submit",
+        trigger_reason: "edited",
+      )
+    end
+  end
+
+  describe "#resubmit_topics" do
+    it "fails pending logs for a category that became restricted" do
+      described_class.enqueue(topic)
+
+      described_class.resubmit_topics(category_id: category.id, mode: "revoke")
+
+      expect(DiscourseIndexNow::SubmissionLog.where(url: topic.url)).to all(be_failed)
+    end
+
+    it "submits every eligible topic in a category" do
+      described_class.resubmit_topics(category_id: category.id, trigger_reason: :category_changed)
+
+      expect(DiscourseIndexNow::SubmissionLog.pluck(:url)).to contain_exactly(topic.url)
+      expect(DiscourseIndexNow::SubmissionLog.first.trigger_reason).to eq("category_changed")
+    end
+
+    it "submits every topic carrying a tag" do
       tag = Fabricate(:tag)
       topic.tags << tag
-      Discourse.redis.del(described_class.debounce_key(topic.id))
 
-      described_class.handle_tag_updated(tag)
+      described_class.resubmit_topics(tag_id: tag.id, trigger_reason: :edited)
 
-      expect(DiscourseIndexNow::SubmissionLog.count).to eq(1)
+      expect(DiscourseIndexNow::SubmissionLog.pluck(:url)).to contain_exactly(topic.url)
       expect(DiscourseIndexNow::SubmissionLog.first.locale).to be_nil
+    end
+
+    # One batch of URLs, not one submission job per topic.
+    it "collapses a whole category into a single submission batch" do
+      4.times { Fabricate(:topic, category: category) }
+
+      described_class.resubmit_topics(category_id: category.id)
+
+      expect(DiscourseIndexNow::SubmissionLog.count).to eq(5)
+      expect(DiscourseIndexNow::SubmissionLog.distinct.count(:batch_id)).to eq(1)
+    end
+
+    it "does nothing without a category or tag" do
+      expect { described_class.resubmit_topics }.not_to change {
+        DiscourseIndexNow::SubmissionLog.count
+      }
     end
   end
 

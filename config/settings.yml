@@ -13,6 +13,13 @@ discourse_index_now:
   indexnow_submit_on_edit:
     default: true
     client: false
+  indexnow_submit_on_reply:
+    default: false
+    client: false
+  indexnow_url_cooldown_minutes:
+    default: 1
+    min: 0
+    client: false
   indexnow_excluded_category_ids:
     type: category_list
     default: ""

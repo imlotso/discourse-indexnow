@@ -5,13 +5,14 @@ import { service } from "@ember/service";
 import { trustHTML } from "@ember/template";
 import { ajax } from "discourse/lib/ajax";
 import { popupAjaxError } from "discourse/lib/ajax-error";
+import { duration } from "discourse/lib/formatter";
 import { i18n } from "discourse-i18n";
 
 const PER_PAGE = 50;
 const TREND_DAY_WIDTH = 40;
 const TREND_BAR_HEIGHT = 72;
 
-export default class AdminPluginsShowDiscourseIndexNowController extends Controller {
+export default class AdminPluginsShowDiscourseIndexNowLogsController extends Controller {
   @service dialog;
 
   @tracked data = null;
@@ -97,6 +98,83 @@ export default class AdminPluginsShowDiscourseIndexNowController extends Control
     }));
   }
 
+  /**
+   * The plugin's own submission caps, shaped for the quota bars.
+   *
+   * Both windows roll: the backend sums fine-grained buckets covering the last
+   * hour and the last day, so there is no boundary to count down to and no
+   * moment when a cap is handed back all at once. Capacity returns gradually,
+   * as the oldest counted submissions age out.
+   *
+   * These are the plugin's own caps. IndexNow publishes no quota; its only
+   * signal is the 429 surfaced by `throttledFor` below.
+   */
+  get quotas() {
+    const usage = this.stats.usage || {};
+
+    return [
+      {
+        key: "hourly",
+        label: i18n("discourse_index_now.admin.quota_hourly"),
+        used: usage.hourly_used || 0,
+        limit: usage.hourly_limit || 0,
+        freesIn: usage.hourly_frees_in,
+      },
+      {
+        key: "daily",
+        label: i18n("discourse_index_now.admin.quota_daily"),
+        used: usage.daily_used || 0,
+        limit: usage.daily_limit || 0,
+        freesIn: usage.daily_frees_in,
+      },
+    ].map((quota) => this.buildQuotaBar(quota));
+  }
+
+  /**
+   * One quota bar.
+   *
+   * A limit of 0 does not mean unlimited: Throttle#available_capacity returns 0
+   * when either limit is <= 0, so nothing is submitted at all. Draw that as a
+   * full bar and say why, rather than as an empty one that reads as idle.
+   */
+  buildQuotaBar(quota) {
+    const blocked = quota.limit <= 0;
+    const exhausted = blocked || quota.used >= quota.limit;
+    const percent = blocked
+      ? 100
+      : Math.min(100, Math.round((quota.used / quota.limit) * 100));
+
+    return {
+      ...quota,
+      blocked,
+      exhausted,
+      percent,
+      style: trustHTML(`width: ${percent}%`),
+      countLabel: blocked
+        ? i18n("discourse_index_now.admin.quota_blocked")
+        : i18n("discourse_index_now.admin.quota_count", {
+            used: quota.used,
+            limit: quota.limit,
+          }),
+      // Only worth saying once a cap is spent, and never for a limit of 0:
+      // nothing ages out of a window that admits nothing, so there is no
+      // countdown to offer -- an admin has to raise the setting.
+      freesLabel:
+        exhausted && !blocked && typeof quota.freesIn === "number"
+          ? i18n("discourse_index_now.admin.quota_frees_in", {
+              duration: duration(quota.freesIn),
+            })
+          : null,
+    };
+  }
+
+  /** Set only while IndexNow itself has us backed off after answering 429. */
+  get throttledFor() {
+    const seconds = this.stats.usage?.throttled_for;
+
+    return typeof seconds === "number" ? duration(seconds) : null;
+  }
+
   get atFirstPage() {
     return this.page <= 1;
   }
@@ -175,8 +253,33 @@ export default class AdminPluginsShowDiscourseIndexNowController extends Control
     await this.load();
   }
 
+  /**
+   * Replacing a key is a legitimate thing to want, but it is destructive in a way
+   * the button does not look, so it asks first.
+   *
+   * The old key stops working the moment this returns, and IndexNow validates
+   * keys out of band: a submission whose key it has not yet re-fetched from
+   * /<key>.txt comes back 202 ("key validation pending") rather than 200, and
+   * those URLs are dropped if that validation then fails. So an accidental
+   * rotation does not merely change a string, it can silently cost indexing until
+   * search engines catch up.
+   *
+   * Nothing is at stake when no key is set yet, so that case skips the prompt.
+   */
   @action
-  async generateKey() {
+  generateKey() {
+    if (!this.stats.api_key) {
+      return this.rotateKey();
+    }
+
+    this.dialog.deleteConfirm({
+      message: i18n("discourse_index_now.admin.generate_key_confirm"),
+      confirmButtonLabel: "discourse_index_now.admin.generate_key_confirm_button",
+      didConfirm: () => this.rotateKey(),
+    });
+  }
+
+  async rotateKey() {
     try {
       this.loading = true;
       await ajax(

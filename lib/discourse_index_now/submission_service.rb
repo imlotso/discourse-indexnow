@@ -2,14 +2,33 @@
 
 module DiscourseIndexNow
   class SubmissionService
-    DEBOUNCE_SECONDS = 60
+    # Fallback for the topic cooldown when the setting is absent, matching the
+    # value this was hardcoded to before it became configurable.
+    DEFAULT_COOLDOWN_MINUTES = 1
     CATEGORY_INELIGIBLE_REASON = "category_moved_ineligible"
     BATCH_SIZE = 10_000
+    RESUBMIT_BATCH_SIZE = 1_000
 
     def self.handle_post_created(post)
       return unless SiteSetting.indexnow_enabled?
+
+      # A reply changes the topic page as surely as an edit does, but it is much
+      # higher volume, so it is opt-in and shares the per-topic cooldown.
+      unless post.is_first_post?
+        return unless SiteSetting.indexnow_submit_on_reply?
+
+        # Submit the crawler page the reply landed on, not the topic's base URL.
+        # On a long topic those are different pages and only the former changed.
+        return(
+          enqueue_topic(
+            post.topic,
+            trigger_reason: :replied,
+            page: UrlBuilder.page_for(post.post_number),
+          )
+        )
+      end
+
       return unless SiteSetting.indexnow_submit_on_create?
-      return unless post.is_first_post?
 
       enqueue_topic(post.topic, trigger_reason: :created)
     end
@@ -60,24 +79,65 @@ module DiscourseIndexNow
       return if category.blank?
       return unless category.saved_change_to_read_restricted?
 
-      topics = Topic.where(category_id: category.id)
-
-      if category.read_restricted?
-        topics.find_each { |topic| mark_topic_logs_failed(topic, "category_restricted") }
-      else
-        topics.find_each do |topic|
-          enqueue_topic(topic, localized: false, trigger_reason: :category_changed)
-        end
-      end
+      Jobs.enqueue(
+        Jobs::DiscourseIndexNow::ResubmitTopics,
+        category_id: category.id,
+        mode: category.read_restricted? ? "revoke" : "submit",
+        trigger_reason: "category_changed",
+      )
     end
 
     def self.handle_tag_updated(tag)
       return unless SiteSetting.indexnow_enabled?
       return if tag.blank?
 
-      tag.topics.find_each do |topic|
-        enqueue_topic(topic, localized: false, trigger_reason: :edited)
+      Jobs.enqueue(
+        Jobs::DiscourseIndexNow::ResubmitTopics,
+        tag_id: tag.id,
+        mode: "submit",
+        trigger_reason: "edited",
+      )
+    end
+
+    # Bulk counterpart to enqueue_topic, run from Jobs::DiscourseIndexNow::ResubmitTopics.
+    #
+    # Collects URLs in batches and hands each batch to enqueue_batch, which chunks at
+    # the 10,000-URL protocol limit. One category or tag therefore costs a handful of
+    # submission jobs rather than one per topic. enqueue_batch already skips URLs that
+    # are still pending, so the per-topic redis debounce is not needed here.
+    def self.resubmit_topics(
+      category_id: nil,
+      tag_id: nil,
+      mode: "submit",
+      trigger_reason: :category_changed
+    )
+      scope = resubmit_scope(category_id: category_id, tag_id: tag_id)
+      return if scope.nil?
+
+      if mode == "revoke"
+        reason = category_id.present? ? "category_restricted" : "tag_ineligible"
+        scope.find_each(batch_size: RESUBMIT_BATCH_SIZE) { |topic| mark_topic_logs_failed(topic, reason) }
+        return
       end
+
+      return if SiteSetting.indexnow_api_key.blank?
+
+      scope.find_in_batches(batch_size: RESUBMIT_BATCH_SIZE) do |topics|
+        entries =
+          topics.filter_map do |topic|
+            { url: topic.url, locale: nil } if Eligibility.eligible?(topic)
+          end
+        next if entries.blank?
+
+        enqueue_batch(entries, trigger_reason: trigger_reason)
+      end
+    end
+
+    def self.resubmit_scope(category_id: nil, tag_id: nil)
+      return Topic.where(category_id: category_id) if category_id.present?
+      return Tag.find_by(id: tag_id)&.topics if tag_id.present?
+
+      nil
     end
 
     def self.disable_if_login_required!
@@ -89,15 +149,20 @@ module DiscourseIndexNow
       enqueue_topic(topic)
     end
 
-    def self.enqueue_topic(topic, localized: true, trigger_reason: :created)
+    def self.enqueue_topic(topic, localized: true, trigger_reason: :created, page: nil)
       return if topic.blank?
       return if SiteSetting.indexnow_api_key.blank?
       return unless Eligibility.eligible?(topic)
 
-      key = debounce_key(topic.id)
-      return unless Discourse.redis.set(key, "1", nx: true, ex: DEBOUNCE_SECONDS)
+      # The cooldown is claimed per URL rather than per topic, so a page that has
+      # just started collecting replies is submitted straight away while the page
+      # that filled up earlier stays capped. That keeps a busy topic to one
+      # submission per page per window instead of one per reply.
+      entries = build_url_entries(topic, localized: localized, page: page).select do |entry|
+        claim_cooldown(entry[:url])
+      end
+      return if entries.blank?
 
-      entries = build_url_entries(topic, localized: localized)
       enqueue_batch(entries, topic_id: topic.id, trigger_reason: trigger_reason)
     end
 
@@ -169,17 +234,42 @@ module DiscourseIndexNow
       enqueue_batch(UrlBuilder.build_urls(topic), trigger_reason: :deleted)
     end
 
-    def self.debounce_key(topic_or_id)
-      identifier = topic_or_id.respond_to?(:id) ? topic_or_id.id : topic_or_id
-      "indexnow:debounce:topic:#{identifier}"
+    # Keyed on the submitted URL, so each crawler page of a topic cools down
+    # independently. Hashed because topic URLs are long and unbounded.
+    def self.debounce_key(url)
+      "indexnow:debounce:url:#{Digest::SHA256.hexdigest(url.to_s)}"
     end
 
-    def self.build_url_entries(topic, localized: true)
+    # Shortest gap between automatic submissions of the same URL. Every automatic
+    # trigger -- created, edited, replied, category_changed -- shares the key for
+    # a given URL, so a page costs one submission per window rather than one per
+    # event, while a page that has not been submitted yet goes out immediately.
+    #
+    # Only automatic triggers go through here. Manual submissions and backfills
+    # call enqueue_batch directly because an admin asked for those explicitly, and
+    # deletion notices bypass it because they must always be delivered.
+    def self.cooldown_seconds
+      minutes = SiteSetting.indexnow_url_cooldown_minutes
+      minutes = DEFAULT_COOLDOWN_MINUTES if minutes.nil?
+      [minutes.to_i, 0].max * 60
+    end
+
+    # Returns true when this topic may be submitted now, taking the slot if so.
+    # A cooldown of 0 disables the gate; enqueue_batch still drops URLs that are
+    # already pending, so that does not mean duplicate rows.
+    def self.claim_cooldown(url)
+      seconds = cooldown_seconds
+      return true if seconds.zero?
+
+      Discourse.redis.set(debounce_key(url), "1", nx: true, ex: seconds).present?
+    end
+
+    def self.build_url_entries(topic, localized: true, page: nil)
       return [] if topic.blank?
-      return [{ url: topic.url, locale: nil }] unless localized
+      return [{ url: UrlBuilder.page_url(topic, page), locale: nil }] unless localized
 
       UrlBuilder
-        .build_urls(topic)
+        .build_urls(topic, page: page)
         .select do |entry|
           entry[:locale].nil? || Eligibility.eligible_locales(topic, [entry[:locale]]).present?
         end

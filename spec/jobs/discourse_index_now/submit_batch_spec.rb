@@ -29,14 +29,12 @@ describe Jobs::DiscourseIndexNow::SubmitBatch do
     SiteSetting.indexnow_hourly_limit = 200
     SiteSetting.indexnow_daily_limit = 10_000
     Discourse.redis.del(DiscourseIndexNow::Throttle::THROTTLE_UNTIL_KEY)
-    Discourse.redis.del(DiscourseIndexNow::Throttle.hourly_key)
-    Discourse.redis.del(DiscourseIndexNow::Throttle.daily_key)
+    DiscourseIndexNow::Throttle.reset!
   end
 
   after do
     Discourse.redis.del(DiscourseIndexNow::Throttle::THROTTLE_UNTIL_KEY)
-    Discourse.redis.del(DiscourseIndexNow::Throttle.hourly_key)
-    Discourse.redis.del(DiscourseIndexNow::Throttle.daily_key)
+    DiscourseIndexNow::Throttle.reset!
   end
 
   it "submits all URLs in a batch and marks each log successful" do
@@ -96,7 +94,7 @@ describe Jobs::DiscourseIndexNow::SubmitBatch do
   end
 
   it "submits only the remaining capacity and reschedules the rest" do
-    Discourse.redis.set(DiscourseIndexNow::Throttle.hourly_key, 199)
+    DiscourseIndexNow::Throttle.record_submission!(199)
     allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(
       success: true,
       status: 202,
@@ -114,7 +112,7 @@ describe Jobs::DiscourseIndexNow::SubmitBatch do
   end
 
   it "reschedules without submitting when no capacity remains" do
-    Discourse.redis.set(DiscourseIndexNow::Throttle.hourly_key, 200)
+    DiscourseIndexNow::Throttle.record_submission!(200)
     allow(DiscourseIndexNow::Client).to receive(:submit_batch)
     allow(Jobs).to receive(:enqueue_in)
 
@@ -148,7 +146,7 @@ describe Jobs::DiscourseIndexNow::SubmitBatch do
       described_class.new.execute(batch_id: backfill_batch_id, batch_index: 1)
       break if backfill_logs.none? { |log| log.reload.pending? }
 
-      Discourse.redis.del(DiscourseIndexNow::Throttle.hourly_key)
+      DiscourseIndexNow::Throttle.reset!
     end
 
     expect(DiscourseIndexNow::Client).to have_received(:submit_batch).at_least(3).times

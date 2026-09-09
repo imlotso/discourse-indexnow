@@ -4,6 +4,8 @@ zh_CN:
     indexnow_api_key: "IndexNow API key（32 位十六进制字符）"
     indexnow_submit_on_create: "提交新话题到 IndexNow"
     indexnow_submit_on_edit: "重新提交编辑后的首帖到 IndexNow"
+    indexnow_submit_on_reply: "有新回复时重新提交话题到 IndexNow。回复会改变话题页面内容，但在活跃论坛上，这比仅提交新话题的量要大得多。只提交回复所在的爬虫分页，并由“URL 冷却时间”设置控制同一页的重复提交频率。"
+    indexnow_url_cooldown_minutes: "同一 URL 两次自动提交之间的最短间隔（分钟）。爬虫看到的长话题是分页 URL，因此每一页单独计算冷却时间：刚开始有回复的新页会立即提交，而此前已写满的页则需等待。设为 1440 表示每页每天最多提交一次，设为 0 表示不限制。手动提交、历史补量和删除通知不受此限制。"
     indexnow_excluded_category_ids: "永不提交到 IndexNow 的分类"
     indexnow_excluded_tag_names: "永不提交到 IndexNow 的标签"
     indexnow_hourly_limit: "每小时提交到 IndexNow 的 URL 上限"

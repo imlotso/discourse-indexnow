@@ -1,7 +1,7 @@
 import { ajax } from "discourse/lib/ajax";
 import DiscourseRoute from "discourse/routes/discourse";
 
-export default class AdminPluginsShowDiscourseIndexNow extends DiscourseRoute {
+export default class AdminPluginsShowDiscourseIndexNowLogs extends DiscourseRoute {
   model() {
     return ajax("/admin/plugins/discourse-indexnow/logs.json", {
       data: {

@@ -44,6 +44,35 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
       expect(json["stats"]["key_accessible"]).to eq(true)
     end
 
+    # The admin page draws its quota bars from these numbers; without them it
+    # renders two empty bars that read as "nothing submitted yet".
+    it "includes the throttle counters the quota bars are drawn from" do
+      DiscourseIndexNow::Throttle.record_submission!(5)
+
+      get "/admin/plugins/discourse-indexnow/logs.json"
+
+      usage = response.parsed_body["stats"]["usage"]
+      expect(usage["hourly_used"]).to eq(5)
+      expect(usage["daily_used"]).to eq(5)
+      expect(usage["hourly_limit"]).to eq(SiteSetting.indexnow_hourly_limit)
+      expect(usage["daily_limit"]).to eq(SiteSetting.indexnow_daily_limit)
+      expect(usage["hourly_window"]).to eq(3600)
+      expect(usage["daily_window"]).to eq(86_400)
+    end
+
+    it "returns a pending state without waiting for a cold-cache probe" do
+      allow(DiscourseIndexNow::KeyAccessibility).to receive(:check).and_return(nil)
+
+      get "/admin/plugins/discourse-indexnow/logs.json"
+
+      expect(response.status).to eq(200)
+      expect(response.parsed_body["stats"]).to include(
+        "key_accessible" => nil,
+        "key_accessibility_pending" => true,
+        "key_accessibility_status" => "pending",
+      )
+    end
+
     it "filters by status, URL, and batch id" do
       DiscourseIndexNow::SubmissionLog.create!(
         url: "https://forum.example.com/t/one/1",

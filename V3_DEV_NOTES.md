@@ -96,8 +96,10 @@ IndexNow 响应 → 更新每条日志。逻辑批次通过 `batch_id` 关联，
 - 默认节流阈值：`indexnow_hourly_limit = 200`，`indexnow_daily_limit = 10000`。
   这两个是插件自己的 Redis 计数，不等于 IndexNow 服务端限额。
 - IndexNow 成功状态以 HTTP 200/202 为准；V1 生产环境已真实拿到过 202。
-- `KeyAccessibility.check` 用 `Excon.get` 访问 `Discourse.base_url/<key>.txt`，
-  要求 body 精确匹配 key，结果按 key hash 缓存 5 分钟。
+- `KeyAccessibility.check` 只读取缓存；冷缓存时用 Redis 锁去重并排队
+  `CheckKeyAccessibility`。Sidekiq job 用 `Excon.get` 访问
+  `Discourse.base_url/<key>.txt`，要求 body 精确匹配 key，结果按 key hash 缓存
+  5 分钟，因此管理页面请求不等待网络自检。
 - 历史补量和手动提交都复用 `SubmissionService.enqueue_batch`，入口不同但不会绕过
   topic eligibility、本站域名校验或 10,000 条协议上限。
 

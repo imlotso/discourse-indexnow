@@ -19,8 +19,8 @@
 }
 
 .indexnow-controls,
-.status-filters,
-.url-search,
+.indexnow-status-filters,
+.indexnow-url-search,
 .indexnow-pagination,
 .indexnow-chart-legend {
   display: flex;
@@ -46,10 +46,73 @@
   width: 100%;
 }
 
-@media (max-width: 700px) {
+@media (width <= 700px) {
   .indexnow-backfill-controls {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.indexnow-quotas {
+  min-width: 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--primary-low);
+  border-radius: 0.5rem;
+
+  h3 {
+    margin: 0 0 0.5rem;
+    font-size: var(--font-down-1);
+  }
+}
+
+.indexnow-quota-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.75rem 1rem;
+
+  @media (width <= 700px) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.indexnow-quota-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+  font-size: var(--font-down-1);
+}
+
+.indexnow-quota-count {
+  color: var(--primary-medium);
+}
+
+.indexnow-quota-track {
+  width: 100%;
+  height: 0.5rem;
+  background: var(--primary-low);
+  border-radius: 0.25rem;
+  overflow: hidden;
+}
+
+.indexnow-quota-bar {
+  display: block;
+  height: 100%;
+  background: var(--success);
+  border-radius: 0.25rem;
+}
+
+.indexnow-quota-bar--exhausted {
+  background: var(--danger);
+}
+
+.indexnow-quota-frees {
+  margin-top: 0.25rem;
+  font-size: var(--font-down-2);
+  color: var(--primary-medium);
+}
+
+.indexnow-quota-throttled {
+  margin-bottom: 0.75rem;
 }
 
 .indexnow-charts {
@@ -58,7 +121,7 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 1rem;
 
-  @media (max-width: 700px) {
+  @media (width <= 700px) {
     grid-template-columns: minmax(0, 1fr);
   }
 }
@@ -88,7 +151,7 @@
   font-size: 10px;
 }
 
-@media (max-width: 700px) {
+@media (width <= 700px) {
   .indexnow-trend-label--middle {
     display: none;
   }
@@ -165,6 +228,10 @@
 
 .indexnow-key-accessible {
   background: var(--success);
+}
+
+.indexnow-key-pending {
+  background: var(--tertiary);
 }
 
 .indexnow-key-unavailable {

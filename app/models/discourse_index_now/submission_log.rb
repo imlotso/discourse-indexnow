@@ -18,6 +18,7 @@ module DiscourseIndexNow
       category_changed: 3,
       backfill: 4,
       manual: 5,
+      replied: 6,
     }
 
     validates :url, presence: true

@@ -4,6 +4,8 @@ en:
     indexnow_api_key: "IndexNow API key (32 hexadecimal characters)"
     indexnow_submit_on_create: "Submit new topics to IndexNow"
     indexnow_submit_on_edit: "Resubmit edited first posts to IndexNow"
+    indexnow_submit_on_reply: "Resubmit a topic to IndexNow when a reply is added. A reply changes the topic page, so search engines have something new to fetch, but on a busy forum this is far more submissions than topic creation alone. Only the crawler page the reply landed on is submitted, and the URL cooldown setting controls how often one page may be resubmitted."
+    indexnow_url_cooldown_minutes: "Shortest gap between automatic submissions of the same URL, in minutes. Crawlers see a long topic as a series of paginated URLs, so each page cools down on its own: a page that has just started collecting replies is submitted straight away, while the page that filled up earlier waits. Set to 1440 to submit a page at most once a day, or 0 to disable the cooldown. Manual submissions, backfills and deletion notices ignore it."
     indexnow_excluded_category_ids: "Categories that should never be submitted to IndexNow"
     indexnow_excluded_tag_names: "Tags whose topics should never be submitted to IndexNow"
     indexnow_hourly_limit: "Maximum URLs submitted to IndexNow per hour"

@@ -32,8 +32,10 @@ export default <template>
 
       <div class="indexnow-key-status">
         <strong>{{i18n "discourse_index_now.admin.key_accessible"}}:</strong>
-        <span class="indexnow-key-dot indexnow-key-{{if @controller.stats.key_accessible "accessible" "unavailable"}}"></span>
-        {{#if @controller.stats.key_accessible}}
+        <span class="indexnow-key-dot indexnow-key-{{@controller.stats.key_accessibility_status}}"></span>
+        {{#if @controller.stats.key_accessibility_pending}}
+          {{i18n "discourse_index_now.admin.pending"}}
+        {{else if @controller.stats.key_accessible}}
           {{i18n "discourse_index_now.admin.yes"}}
         {{else}}
           {{i18n "discourse_index_now.admin.no"}}
@@ -55,6 +57,47 @@ export default <template>
         @action={{@controller.generateKey}}
         @disabled={{@controller.loading}}
       />
+    </section>
+
+    <section class="indexnow-quotas">
+      <h3>{{i18n "discourse_index_now.admin.quota_title"}}</h3>
+
+      {{#if @controller.throttledFor}}
+        <div class="alert alert-warning indexnow-quota-throttled">
+          {{i18n
+            "discourse_index_now.admin.quota_throttled"
+            duration=@controller.throttledFor
+          }}
+        </div>
+      {{/if}}
+
+      <div class="indexnow-quota-grid">
+        {{#each @controller.quotas as |quota|}}
+          <div class="indexnow-quota">
+            <div class="indexnow-quota-header">
+              <span>{{quota.label}}</span>
+              <span class="indexnow-quota-count">{{quota.countLabel}}</span>
+            </div>
+            <div
+              class="indexnow-quota-track"
+              role="progressbar"
+              aria-label={{quota.label}}
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={{quota.percent}}
+              aria-valuetext={{quota.countLabel}}
+            >
+              <span
+                class="indexnow-quota-bar {{if quota.exhausted "indexnow-quota-bar--exhausted"}}"
+                style={{quota.style}}
+              ></span>
+            </div>
+            {{#if quota.freesLabel}}
+              <div class="indexnow-quota-frees">{{quota.freesLabel}}</div>
+            {{/if}}
+          </div>
+        {{/each}}
+      </div>
     </section>
 
     <section class="indexnow-charts">
@@ -188,7 +231,7 @@ export default <template>
     </section>
 
     <section class="indexnow-controls">
-      <div class="status-filters">
+      <div class="indexnow-status-filters">
         <DButton
           @label="discourse_index_now.admin.filter_all"
           @action={{@controller.filterAll}}
@@ -211,7 +254,7 @@ export default <template>
         />
       </div>
 
-      <div class="url-search">
+      <div class="indexnow-url-search">
         <DTextField
           @value={{@controller.url}}
           @placeholderKey="discourse_index_now.admin.url_placeholder"

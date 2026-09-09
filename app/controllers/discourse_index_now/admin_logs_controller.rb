@@ -151,16 +151,20 @@ module DiscourseIndexNow
       today = Time.zone.now.beginning_of_day
       failures = SubmissionLog.where(status: :failed).where("created_at >= ?", 7.days.ago)
       failure_breakdown = build_failure_breakdown(failures)
+      key_accessible = KeyAccessibility.check(SiteSetting.indexnow_api_key)
 
       {
         enabled: SiteSetting.indexnow_enabled?,
         login_required: SiteSetting.login_required?,
         api_key: SiteSetting.indexnow_api_key,
-        key_accessible: KeyAccessibility.check(SiteSetting.indexnow_api_key),
+        key_accessible: key_accessible,
+        key_accessibility_pending: key_accessible.nil?,
+        key_accessibility_status: key_accessibility_status(key_accessible),
         today_success_count: SubmissionLog.where(status: :success).where("created_at >= ?", today).count,
         today_failed_count: SubmissionLog.where(status: :failed).where("created_at >= ?", today).count,
         trend_7d: trend_7d,
         failure_breakdown: failure_breakdown,
+        usage: Throttle.usage,
         categories: Category.order(:name).pluck(:id, :name).map { |id, name| { id: id, name: name } },
       }
     end
@@ -180,6 +184,12 @@ module DiscourseIndexNow
             .count,
         }
       end
+    end
+
+    def key_accessibility_status(key_accessible)
+      return "pending" if key_accessible.nil?
+
+      key_accessible ? "accessible" : "unavailable"
     end
 
     def build_failure_breakdown(failures)
