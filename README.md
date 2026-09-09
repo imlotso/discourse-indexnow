@@ -9,12 +9,13 @@ Automatically submit Discourse topic URLs to the [IndexNow](https://www.indexnow
 ## Features
 
 - Submit new public topics and topic-changing edits automatically.
+- Submit the paginated URL automatically on new replies (with configurable per-URL cooldown).
 - Submit topic URLs when a topic is destroyed so IndexNow-aware engines can recheck them and remove them faster.
 - Include localized topic URLs when Discourse Content Localization and its crawler locale parameter are enabled.
 - Submit localized URLs when a translation is created, including translations completed after the initial topic submission.
 - Submit the main topic URL and all existing localizations in one IndexNow `urlList` batch.
 - Reuse the same batching engine for historical backfills, with automatic 10,000-URL chunks.
-- Apply hourly and daily submission limits, and honor IndexNow `Retry-After` responses.
+- Apply hourly and daily submission limits using a sliding window, and honor IndexNow `Retry-After` responses.
 - Rotate the IndexNow key; the previous key is invalidated immediately.
 - Verify that `/<key>.txt` is publicly accessible from the admin panel.
 - Re-submit or exclude content when topics move, categories change visibility, or tags update.
@@ -28,68 +29,62 @@ Automatically submit Discourse topic URLs to the [IndexNow](https://www.indexnow
 
 - Discourse latest stable or tests-passed branch.
 - No extra gems or frontend theme changes.
-- Optional Content Localization support for localized URL submission.
+- Localized URL submission requires the optional Content Localization feature.
 
 ## Installation
 
 1. Install the plugin in your Discourse container:
-
    ```sh
    cd /var/discourse
    ./launcher enter app
    bash -c "cd plugins && git clone https://github.com/imlotso/discourse-indexnow.git"
    exit
    ```
-
 2. Rebuild the container:
-
    ```sh
    cd /var/discourse
    ./launcher rebuild app
    ```
-
-3. Open **Admin > Plugins > discourse-indexnow**.
-4. Generate a key or paste an existing 32-character hexadecimal key.
+3. Navigate to **Admin > Plugins > discourse-indexnow**.
+4. Generate a key, or provide an existing 32-character hex key.
 5. Enable the plugin.
-6. Verify the public key endpoint:
-
+6. Verify the public key URL:
    ```text
-   https://your-forum.example.com/<key>.txt
+   https://your-forum-domain.com/<key>.txt
    ```
+   This should return the key itself and HTTP 200. The admin panel also displays a cached accessibility check.
 
-   It should return the key itself with HTTP 200. The admin panel also shows a cached accessibility check.
-
-## Configuration
+## Settings
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `indexnow_enabled` | `false` | Master switch. |
-| `indexnow_api_key` | `""` | Current 32-character hexadecimal key. |
-| `indexnow_submit_on_create` | `true` | Submit new topics. |
-| `indexnow_submit_on_edit` | `true` | Submit first-post and topic-changing edits. |
-| `indexnow_excluded_category_ids` | `""` | Additional category denylist. |
-| `indexnow_excluded_tag_names` | `""` | Additional tag denylist. |
-| `indexnow_hourly_limit` | `200` | Maximum URLs submitted per hour. |
-| `indexnow_daily_limit` | `10000` | Maximum URLs submitted per day. |
+| `indexnow_enabled` | `false` | Master toggle for the plugin. |
+| `indexnow_api_key` | `""` | The current 32-character hex key. |
+| `indexnow_submit_on_create` | `true` | Submit when a new topic is published. |
+| `indexnow_submit_on_edit` | `true` | Resubmit when first post or topic attributes change. |
+| `indexnow_submit_on_reply` | `false` | Submit the paginated URL on new reply. |
+| `indexnow_url_cooldown_minutes` | `1` | Per-URL cooldown (minutes) to prevent spamming. |
+| `indexnow_excluded_category_ids` | `""` | Additional categories to exclude. |
+| `indexnow_excluded_tag_names` | `""` | Additional tags to exclude. |
+| `indexnow_hourly_limit` | `200` | Max URLs to submit per hour. |
+| `indexnow_daily_limit` | `10000` | Max URLs to submit per day. |
 
-The plugin cannot be enabled while `login required` is true, and it automatically disables itself if that setting is turned on later.
+The plugin refuses to enable if the site requires login, and automatically disables itself if that setting is turned on later.
 
-Automatic `submit on create` and `submit on edit` settings cover new and edited topics. Historical backfill and manual submission are separate admin actions:
+The `submit on create` and `submit on edit` settings govern automatic submissions for new and edited topics only. Historical backfilling and manual submission are separate admin actions:
 
-- **Historical backfill:** filter topics by category and date range, preview the match, then submit the eligible historical topics in batches.
-- **Manual submission:** paste one on-site URL per line and submit the selected URLs immediately. External URLs and ineligible topic URLs are filtered out automatically.
+- **Historical backfill:** Filter topics by category and date range, preview the matches, and bulk submit eligible historical topics.
+- **Manual submission:** Paste URLs, one per line, to submit specific links instantly. External URLs and ineligible topic URLs are filtered out.
 
 ## Localized URLs
 
-When Discourse Content Localization is enabled and crawler locale URLs are available, the plugin builds one main URL plus one URL for every localization that actually exists on the topic. It uses Discourse's configured locale query parameter, normally `?tl=es`, rather than assuming a fixed parameter name.
+When Discourse Content Localization is enabled and crawler locale URLs are available, the plugin generates the main URL and a variant URL for every localization actually present on the topic. URLs use the exact locale query parameter configured in Discourse, usually `?tl=es`, rather than a hardcoded parameter name.
 
-All eligible URLs share a batch ID in the submission log, so the main URL and its localizations remain individually searchable while still being visibly grouped as one submission.
+All eligible URLs share a single batch ID in the logs. This keeps the main URL and each locale URL searchable individually while showing they belong to the same submission. If a topic is private, restricted, deleted, excluded, or otherwise ineligible, all localized variants are excluded alongside it.
 
-If a topic is private, restricted, deleted, excluded, or otherwise ineligible, every localized variant is excluded as well.
+## Batching and throttling
 
-## Batch submission and throttling
-
-The plugin sends an IndexNow `urlList` array in a single request whenever possible. Logical batches larger than 10,000 URLs are split automatically and tracked with a batch index.
+The plugin attempts to send the `urlList` array in a single request whenever possible. Logical batches larger than 10,000 URLs are split automatically and tracked with a batch index.
 
 Redis counters enforce hourly and daily limits. IndexNow 429 responses set a global throttle deadline using `Retry-After` when provided; otherwise the job uses an increasing retry delay. Rate-limited submissions are recorded as failures with `rate_limit_exceeded`.
 
@@ -100,6 +95,7 @@ The panel under **Admin > Plugins > discourse-indexnow** includes:
 - Plugin and key status.
 - Cached public accessibility state for `/<key>.txt`.
 - Today's success and failure counts.
+- Quota bars showing current usage and time until capacity frees up.
 - A seven-day success and failure trend.
 - Failure breakdowns for rate limits, key errors, domain mismatches, and other errors.
 - Historical backfill preview and submission by category and date range.

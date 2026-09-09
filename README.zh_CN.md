@@ -9,12 +9,13 @@
 ## 功能特性
 
 - 新公开话题和会改变话题属性的编辑会自动提交。
+- 产生新回复时自动提交对应的分页 URL（支持防刷新的单 URL 冷却时间配置）。
 - 话题删除时提交话题 URL，让支持 IndexNow 的搜索引擎更快复查并下架内容。
 - 在 Discourse Content Localization 及其爬虫 locale 参数启用时，自动包含本地化话题 URL。
 - 翻译创建时提交本地化 URL，包括首次提交话题后才完成的翻译。
 - 把主 URL 和实际存在的本地化内容合并为一次 IndexNow `urlList` 批量提交。
 - 历史帖子补量复用同一套批量引擎，并自动按 10,000 条上限分片。
-- 支持每小时和每日提交上限，并识别 IndexNow 的 `Retry-After` 响应。
+- 支持基于滑动窗口 (Sliding window) 的每小时和每日提交上限，并识别 IndexNow 的 `Retry-After` 响应。
 - 支持密钥轮换，生成新密钥后旧密钥立即失效。
 - 管理后台可以检查 `/<key>.txt` 是否公网可访问。
 - 话题移动、分类可见性变化和标签更新时，自动重新提交或同步排除。
@@ -33,30 +34,24 @@
 ## 安装步骤
 
 1. 在 Discourse 容器中安装插件：
-
    ```sh
    cd /var/discourse
    ./launcher enter app
    bash -c "cd plugins && git clone https://github.com/imlotso/discourse-indexnow.git"
    exit
    ```
-
 2. 重建容器：
-
    ```sh
    cd /var/discourse
    ./launcher rebuild app
    ```
-
 3. 打开 **Admin > Plugins > discourse-indexnow**。
 4. 生成密钥，或填入已有的 32 位十六进制密钥。
 5. 启用插件。
 6. 验证公网密钥地址：
-
    ```text
    https://你的论坛域名/<key>.txt
    ```
-
    正常应返回密钥本身和 HTTP 200。管理后台也会显示带缓存的可达性检查结果。
 
 ## 配置项
@@ -67,6 +62,8 @@
 | `indexnow_api_key` | `""` | 当前 32 位十六进制密钥。 |
 | `indexnow_submit_on_create` | `true` | 新话题发布时提交。 |
 | `indexnow_submit_on_edit` | `true` | 首帖或话题属性变化后重新提交。 |
+| `indexnow_submit_on_reply` | `false` | 产生新回复时自动提交对应的分页 URL。 |
+| `indexnow_url_cooldown_minutes` | `1` | 单个 URL 的防刷新冷却时间（分钟）。 |
 | `indexnow_excluded_category_ids` | `""` | 额外排除的分类。 |
 | `indexnow_excluded_tag_names` | `""` | 额外排除的标签。 |
 | `indexnow_hourly_limit` | `200` | 每小时最多提交的 URL 数。 |
@@ -83,9 +80,7 @@
 
 当 Discourse Content Localization 启用且爬虫 locale URL 可用时，插件会生成主 URL，并为话题中真实存在的每个本地化内容生成一个变体 URL。URL 使用 Discourse 实际配置的 locale 查询参数，通常是 `?tl=es`，不会硬编码参数名。
 
-所有符合条件的 URL 在日志中共享同一个批次 ID。因此主 URL 和各 locale URL 仍然可以单独检索，同时也能看出它们属于同一次提交。
-
-如果话题是私密、受限、已删除、被排除或其他不符合条件的内容，所有本地化变体都会同步排除。
+所有符合条件的 URL 在日志中共享同一个批次 ID。因此主 URL 和各 locale URL 仍然可以单独检索，同时也能看出它们属于同一次提交。如果话题是私密、受限、已删除、被排除或其他不符合条件的内容，所有本地化变体都会同步排除。
 
 ## 批量提交与节流
 
@@ -100,6 +95,7 @@ Redis 计数器负责每小时和每日限额。收到 IndexNow 429 时，如果
 - 插件和密钥状态。
 - `/<key>.txt` 的带缓存公网可达性检查。
 - 今日成功和失败数量。
+- 实时配额进度条，精确显示额度恢复倒计时。
 - 近 7 天成功与失败趋势。
 - 限流、密钥错误、域名不匹配和其他错误的分类统计。
 - 按分类和日期范围预览、提交历史帖子。
