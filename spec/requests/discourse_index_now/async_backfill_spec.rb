@@ -38,6 +38,40 @@ describe "IndexNow asynchronous backfill", type: :request do
     expect(response.parsed_body["status_counts"]).to include("success" => 1)
   end
 
+  it "generates more than one full-sized chunk and reports its progress" do
+    now = Time.zone.now
+    rows = Array.new(Jobs::DiscourseIndexNow::GenerateBatch::CHUNK_SIZE + 1) do |index|
+      {
+        title: "Backfill topic #{index}",
+        slug: "backfill-topic-#{index}",
+        category_id: category.id,
+        user_id: admin.id,
+        last_post_user_id: admin.id,
+        bumped_at: now,
+        created_at: now,
+        updated_at: now,
+      }
+    end
+    Topic.insert_all!(rows)
+
+    post "/admin/plugins/discourse-indexnow/backfill_async.json", params: { category_id: category.id }
+    batch_id = response.parsed_body["batch_id"]
+    expect(response.status).to eq(202)
+    expect(DiscourseIndexNow::SubmissionLog.where(batch_id: batch_id)).to be_empty
+
+    Jobs::DiscourseIndexNow::GenerateBatch.new.execute(batch_id: batch_id)
+
+    get "/admin/plugins/discourse-indexnow/batches/#{batch_id}.json"
+    expect(response.parsed_body).to include(
+      "matched_count" => rows.size,
+      "processed_count" => rows.size,
+      "queued_count" => rows.size,
+      "skipped_count" => 0,
+      "status" => "running",
+    )
+    expect(DiscourseIndexNow::SubmissionLog.where(batch_id: batch_id).distinct.pluck(:batch_index)).to contain_exactly(1, 2)
+  end
+
   it "does not generate work after a batch is cancelled" do
     post "/admin/plugins/discourse-indexnow/backfill_async.json", params: { category_id: category.id }
     batch_id = response.parsed_body["batch_id"]

@@ -1,7 +1,6 @@
 import { click, fillIn, visit } from "@ember/test-helpers";
 import { test } from "qunit";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
-import { i18n } from "discourse-i18n";
 
 acceptance("IndexNow admin logs", function (needs) {
   needs.user();
@@ -93,18 +92,20 @@ acceptance("IndexNow admin logs", function (needs) {
     await visit("/admin/plugins/discourse-indexnow/indexnow-logs");
     assert
       .dom(".indexnow-status-success")
-      .hasText(i18n("discourse_index_now.admin.status_accepted_202"));
-    assert.dom(".indexnow-indexing-note").exists();
+      .hasText("Received; key validation was pending");
+    assert
+      .dom(".indexnow-indexing-note")
+      .includesText("does not guarantee crawling or indexing");
   });
 
   test("shows a 200 response as received without claiming it was indexed", async function (assert) {
     successResponseCode = 200;
     await visit("/admin/plugins/discourse-indexnow/indexnow-logs");
 
+    assert.dom(".indexnow-status-success").hasText("Received");
     assert
-      .dom(".indexnow-status-success")
-      .hasText(i18n("discourse_index_now.admin.status_success"));
-    assert.dom(".indexnow-indexing-note").exists();
+      .dom(".indexnow-indexing-note")
+      .includesText("does not guarantee crawling or indexing");
   });
 
   test("sends additional filters and starts backfill asynchronously", async function (assert) {
