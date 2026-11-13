@@ -2,7 +2,7 @@
 
 # name: discourse-indexnow
 # about: Automatically submit new and edited topic URLs to IndexNow-compatible search engines.
-# version: 0.2.2
+# version: 0.3.0
 # authors: sitetalk.net
 # url: https://github.com/imlotso/discourse-indexnow
 
@@ -27,10 +27,17 @@ after_initialize do
   require_relative "app/jobs/discourse_index_now/submit_batch"
   require_relative "app/jobs/discourse_index_now/check_key_accessibility"
   require_relative "app/jobs/discourse_index_now/resubmit_topics"
+  require_relative "app/jobs/discourse_index_now/resume_queued"
+  require_relative "app/jobs/discourse_index_now/flush_cooldown"
+  require_relative "app/jobs/discourse_index_now/generate_batch"
   require_relative "app/jobs/scheduled/discourse_index_now/recover_stalled_logs"
+  require_relative "app/jobs/scheduled/discourse_index_now/cleanup_logs"
   require_relative "app/models/discourse_index_now/submission_log"
+  require_relative "app/models/discourse_index_now/batch"
   require_relative "lib/discourse_index_now/client"
   require_relative "lib/discourse_index_now/eligibility"
+  require_relative "lib/discourse_index_now/log_filter"
+  require_relative "lib/discourse_index_now/backfill_query"
   require_relative "lib/discourse_index_now/key_accessibility"
   require_relative "lib/discourse_index_now/throttle"
   require_relative "lib/discourse_index_now/url_builder"
@@ -61,8 +68,11 @@ after_initialize do
   on(:topic_destroyed) { |topic| DiscourseIndexNow::SubmissionService.handle_topic_destroyed(topic) }
 
   on(:site_setting_changed) do |name, _old_value, _new_value|
-    next unless name.to_sym == :login_required
-
-    DiscourseIndexNow::SubmissionService.disable_if_login_required!
+    case name.to_sym
+    when :login_required
+      DiscourseIndexNow::SubmissionService.disable_if_login_required!
+    when :indexnow_hourly_limit, :indexnow_daily_limit, :indexnow_enabled
+      Jobs.enqueue(Jobs::DiscourseIndexNow::ResumeQueued) if SiteSetting.indexnow_enabled?
+    end
   end
 end

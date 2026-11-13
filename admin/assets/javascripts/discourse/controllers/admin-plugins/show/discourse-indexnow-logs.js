@@ -19,6 +19,11 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
   @tracked status = "";
   @tracked url = "";
   @tracked batchId = "";
+  @tracked triggerReason = "";
+  @tracked responseCode = "";
+  @tracked logLocale = "";
+  @tracked logSince = "";
+  @tracked logUntil = "";
   @tracked page = 1;
   @tracked loading = false;
   @tracked backfillCategoryId = "";
@@ -30,15 +35,79 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
   @tracked manualUrls = "";
   @tracked manualResult = null;
   @tracked manualLoading = false;
+  @tracked batchProgress = null;
+  @tracked retryLoading = false;
+  batchPollTimer = null;
+  batchPollingEnabled = false;
+  loadSequence = 0;
+
+  willDestroy() {
+    this.stopBatchPolling();
+    super.willDestroy(...arguments);
+  }
 
   get logs() {
     return (this.data?.logs || []).map((log) => ({
       ...log,
-      status_label: i18n(`discourse_index_now.admin.status_${log.status}`),
+      status_label: i18n(
+        log.status === "success" && log.response_code === 202
+          ? "discourse_index_now.admin.status_accepted_202"
+          : `discourse_index_now.admin.status_${log.status}`
+      ),
+      can_retry: log.status === "failed",
       trigger_reason_label: i18n(
         `discourse_index_now.admin.trigger_reason_${log.trigger_reason}`
       ),
     }));
+  }
+
+  get triggerOptions() {
+    return [
+      "created",
+      "edited",
+      "deleted",
+      "category_changed",
+      "backfill",
+      "manual",
+      "replied",
+      "reply_edited",
+    ].map((value) => ({
+      value,
+      label: i18n(`discourse_index_now.admin.trigger_reason_${value}`),
+    }));
+  }
+
+  get statusFilters() {
+    return [
+      "",
+      "pending",
+      "processing",
+      "retrying",
+      "success",
+      "failed",
+      "cancelled",
+    ].map((value) => ({
+      value,
+      label: `discourse_index_now.admin.filter_${value || "all"}`,
+      selected: this.status === value,
+    }));
+  }
+
+  get batchProgressLabel() {
+    const batch = this.batchProgress;
+    if (!batch) {
+      return "";
+    }
+    return i18n("discourse_index_now.admin.batch_progress", {
+      status: i18n(`discourse_index_now.admin.batch_status_${batch.status}`),
+      processed: batch.processed_count ?? 0,
+      matched: batch.matched_count ?? 0,
+      queued: batch.queued_count ?? 0,
+      skipped: batch.skipped_count ?? 0,
+      received: batch.status_counts?.success ?? 0,
+      failed: batch.status_counts?.failed ?? 0,
+      cancelled: batch.status_counts?.cancelled ?? 0,
+    });
   }
 
   get stats() {
@@ -88,9 +157,7 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
 
     return breakdown.map((item) => ({
       ...item,
-      label: i18n(
-        `discourse_index_now.admin.failure_${item.category}`
-      ),
+      label: i18n(`discourse_index_now.admin.failure_${item.category}`),
       width: Math.max(2, Math.round((item.count / max) * 180)),
       style: trustHTML(
         `width: ${Math.max(2, Math.round((item.count / max) * 180))}px`
@@ -128,6 +195,77 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
         freesIn: usage.daily_frees_in,
       },
     ].map((quota) => this.buildQuotaBar(quota));
+  }
+
+  /** Set only while IndexNow itself has us backed off after answering 429. */
+  get throttledFor() {
+    const seconds = this.stats.usage?.throttled_for;
+
+    return typeof seconds === "number" ? duration(seconds) : null;
+  }
+
+  get atFirstPage() {
+    return this.page <= 1;
+  }
+
+  get atLastPage() {
+    return this.page >= (this.meta.total_pages || 1);
+  }
+
+  get batchIdEmpty() {
+    return !this.batchId?.trim();
+  }
+
+  get logFilterParams() {
+    const data = {};
+
+    if (this.status) {
+      data.status = this.status;
+    }
+
+    if (this.url) {
+      data.url = this.url;
+    }
+
+    if (this.batchId) {
+      data.batch_id = this.batchId;
+    }
+
+    if (this.triggerReason) {
+      data.trigger_reason = this.triggerReason;
+    }
+    if (this.responseCode) {
+      data.response_code = this.responseCode;
+    }
+    if (this.logLocale) {
+      data.locale = this.logLocale;
+    }
+    if (this.logSince) {
+      data.since = this.logSince;
+    }
+    if (this.logUntil) {
+      data.until = this.logUntil;
+    }
+
+    return data;
+  }
+
+  get backfillParams() {
+    const params = {};
+
+    if (this.backfillCategoryId) {
+      params.category_id = this.backfillCategoryId;
+    }
+
+    if (this.backfillSince) {
+      params.since = this.backfillSince;
+    }
+
+    if (this.backfillUntil) {
+      params.until = this.backfillUntil;
+    }
+
+    return params;
   }
 
   /**
@@ -168,51 +306,11 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
     };
   }
 
-  /** Set only while IndexNow itself has us backed off after answering 429. */
-  get throttledFor() {
-    const seconds = this.stats.usage?.throttled_for;
-
-    return typeof seconds === "number" ? duration(seconds) : null;
-  }
-
-  get atFirstPage() {
-    return this.page <= 1;
-  }
-
-  get atLastPage() {
-    return this.page >= (this.meta.total_pages || 1);
-  }
-
   @action
   async setStatus(value) {
     this.status = value;
     this.page = 1;
     await this.load();
-  }
-
-  @action
-  async filterAll() {
-    await this.setStatus("");
-  }
-
-  @action
-  async filterPending() {
-    await this.setStatus("pending");
-  }
-
-  @action
-  async filterSuccess() {
-    await this.setStatus("success");
-  }
-
-  @action
-  async filterFailed() {
-    await this.setStatus("failed");
-  }
-
-  @action
-  async filterCancelled() {
-    await this.setStatus("cancelled");
   }
 
   @action
@@ -223,14 +321,60 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
 
   @action
   updateBatchId(value) {
+    if (this.batchProgress && value !== this.batchProgress.batch_id) {
+      this.stopBatchPolling();
+      this.batchProgress = null;
+    }
     this.batchId = value;
     this.page = 1;
+  }
+
+  @action
+  setTriggerReason(value) {
+    this.triggerReason = value || "";
+  }
+
+  @action
+  setResponseCode(value) {
+    this.responseCode = value;
+  }
+
+  @action
+  setLogLocale(value) {
+    this.logLocale = value;
+  }
+
+  @action
+  setLogSince(value) {
+    this.logSince = value ? value.format("YYYY-MM-DD") : "";
+  }
+
+  @action
+  setLogUntil(value) {
+    this.logUntil = value ? value.format("YYYY-MM-DD") : "";
   }
 
   @action
   async search() {
     this.page = 1;
     await this.load();
+  }
+
+  @action
+  async viewBatchProgress() {
+    const id = this.batchId?.trim();
+    if (!id) {
+      return;
+    }
+    this.stopBatchPolling();
+    this.batchId = id;
+    this.batchPollingEnabled = true;
+    this.batchProgress = {
+      batch_id: id,
+      status: "queued",
+      pending_lookup: true,
+    };
+    await this.refreshBatch();
   }
 
   @action
@@ -274,7 +418,8 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
 
     this.dialog.deleteConfirm({
       message: i18n("discourse_index_now.admin.generate_key_confirm"),
-      confirmButtonLabel: "discourse_index_now.admin.generate_key_confirm_button",
+      confirmButtonLabel:
+        "discourse_index_now.admin.generate_key_confirm_button",
       didConfirm: () => this.rotateKey(),
     });
   }
@@ -282,12 +427,9 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
   async rotateKey() {
     try {
       this.loading = true;
-      await ajax(
-        "/admin/plugins/discourse-indexnow/generate_key.json",
-        {
-          type: "POST",
-        }
-      );
+      await ajax("/admin/plugins/discourse-indexnow/generate_key.json", {
+        type: "POST",
+      });
       this.batchId = "";
       this.page = 1;
       await this.load();
@@ -299,6 +441,7 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
   }
 
   async load() {
+    const sequence = ++this.loadSequence;
     this.loading = true;
 
     const data = {
@@ -309,37 +452,26 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
     Object.assign(data, this.logFilterParams);
 
     try {
-      this.data = await ajax("/admin/plugins/discourse-indexnow/logs.json", {
+      const result = await ajax("/admin/plugins/discourse-indexnow/logs.json", {
         data,
       });
+      if (sequence === this.loadSequence) {
+        this.data = result;
+      }
     } catch (error) {
-      popupAjaxError(error);
+      if (sequence === this.loadSequence) {
+        popupAjaxError(error);
+      }
     } finally {
-      this.loading = false;
+      if (sequence === this.loadSequence) {
+        this.loading = false;
+      }
     }
-  }
-
-  get logFilterParams() {
-    const data = {};
-
-    if (this.status) {
-      data.status = this.status;
-    }
-
-    if (this.url) {
-      data.url = this.url;
-    }
-
-    if (this.batchId) {
-      data.batch_id = this.batchId;
-    }
-
-    return data;
   }
 
   @action
-  setBackfillCategory(event) {
-    this.backfillCategoryId = event.target.value;
+  setBackfillCategory(value) {
+    this.backfillCategoryId = value || "";
   }
 
   @action
@@ -350,24 +482,6 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
   @action
   setBackfillUntil(value) {
     this.backfillUntil = value ? value.format("YYYY-MM-DD") : "";
-  }
-
-  get backfillParams() {
-    const params = {};
-
-    if (this.backfillCategoryId) {
-      params.category_id = this.backfillCategoryId;
-    }
-
-    if (this.backfillSince) {
-      params.since = this.backfillSince;
-    }
-
-    if (this.backfillUntil) {
-      params.until = this.backfillUntil;
-    }
-
-    return params;
   }
 
   @action
@@ -395,19 +509,127 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
 
     try {
       this.backfillResult = await ajax(
-        "/admin/plugins/discourse-indexnow/backfill.json",
+        "/admin/plugins/discourse-indexnow/backfill_async.json",
         {
           type: "POST",
           data: this.backfillParams,
         }
       );
-      this.batchId = this.backfillResult.batch_id;
-      this.page = 1;
-      await this.load();
+      await this.openBatch(this.backfillResult);
     } catch (error) {
       popupAjaxError(error);
     } finally {
       this.backfillLoading = false;
+    }
+  }
+
+  @action
+  retryFailed() {
+    this.dialog.confirm({
+      message: i18n("discourse_index_now.admin.retry_filtered_confirm"),
+      didConfirm: () => this.performRetry(),
+    });
+  }
+
+  @action
+  retryOne(id) {
+    this.dialog.confirm({
+      message: i18n("discourse_index_now.admin.retry_one_confirm"),
+      didConfirm: () => this.performRetry([id]),
+    });
+  }
+
+  async performRetry(ids) {
+    this.retryLoading = true;
+    try {
+      const data = { ...this.logFilterParams };
+      if (ids) {
+        data.log_ids = ids;
+      }
+      const result = await ajax(
+        "/admin/plugins/discourse-indexnow/retry_failed.json",
+        {
+          type: "POST",
+          data,
+        }
+      );
+      await this.openBatch(result);
+    } catch (error) {
+      popupAjaxError(error);
+    } finally {
+      this.retryLoading = false;
+    }
+  }
+
+  async openBatch(result) {
+    this.stopBatchPolling();
+    this.batchPollingEnabled = true;
+    this.status = "";
+    this.url = "";
+    this.triggerReason = "";
+    this.responseCode = "";
+    this.logLocale = "";
+    this.logSince = "";
+    this.logUntil = "";
+    this.batchId = result.batch_id;
+    this.batchProgress = result;
+    this.page = 1;
+    await this.load();
+    await this.refreshBatch();
+  }
+
+  @action
+  async refreshBatch() {
+    this.clearBatchTimer();
+    const id = this.batchProgress?.batch_id;
+    if (!this.batchPollingEnabled || !id || id !== this.batchId) {
+      return;
+    }
+    try {
+      const result = await ajax(
+        `/admin/plugins/discourse-indexnow/batches/${encodeURIComponent(id)}.json`
+      );
+      if (
+        !this.batchPollingEnabled ||
+        this.batchId !== id ||
+        this.isDestroying
+      ) {
+        return;
+      }
+      const wasFinished = ["completed", "cancelled", "failed"].includes(
+        this.batchProgress?.status
+      );
+      this.batchProgress = result;
+      if (["queued", "running"].includes(result.status)) {
+        this.batchPollTimer = setTimeout(() => this.refreshBatch(), 5000);
+      } else if (!wasFinished) {
+        await this.load();
+      }
+    } catch (error) {
+      if (this.batchProgress?.pending_lookup) {
+        this.batchProgress = null;
+        this.stopBatchPolling();
+      }
+      popupAjaxError(error);
+    }
+  }
+
+  stopBatchPolling() {
+    this.batchPollingEnabled = false;
+    this.clearBatchTimer();
+  }
+
+  clearBatchTimer() {
+    if (this.batchPollTimer) {
+      clearTimeout(this.batchPollTimer);
+      this.batchPollTimer = null;
+    }
+  }
+
+  resumeBatchPolling() {
+    if (this.batchProgress && this.batchProgress.batch_id === this.batchId) {
+      this.batchPollingEnabled = true;
+      this.refreshBatch();
     }
   }
 
@@ -428,6 +650,8 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
           data: { urls: this.manualUrls },
         }
       );
+      this.stopBatchPolling();
+      this.batchProgress = null;
       this.batchId = this.manualResult.batch_id;
       this.page = 1;
       await this.load();
@@ -472,6 +696,9 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
 
       this.page = 1;
       await this.load();
+      if (this.batchProgress) {
+        await this.refreshBatch();
+      }
     } catch (error) {
       popupAjaxError(error);
     } finally {

@@ -9,6 +9,8 @@ module DiscourseIndexNow
       success: 1,
       failed: 2,
       cancelled: 3,
+      processing: 4,
+      retrying: 5,
     }
 
     enum :trigger_reason, {
@@ -19,6 +21,7 @@ module DiscourseIndexNow
       backfill: 4,
       manual: 5,
       replied: 6,
+      reply_edited: 7,
     }
 
     validates :url, presence: true
@@ -31,17 +34,24 @@ end
 #
 # Table name: indexnow_submission_logs
 #
-#  id             :bigint           not null, primary key
-#  batch_index    :integer          default(0), not null
-#  error_message  :text
-#  locale         :string(20)
-#  response_code  :integer
-#  status         :integer          default("pending"), not null
-#  trigger_reason :integer          default("created"), not null
-#  url            :string           not null
-#  created_at     :datetime         not null
-#  updated_at     :datetime         not null
-#  batch_id       :string
+#  id               :bigint           not null, primary key
+#  attempt_count    :integer          default(0), not null
+#  available_at     :datetime
+#  batch_index      :integer          default(0), not null
+#  cancel_requested :boolean          default(FALSE), not null
+#  claim_token      :string
+#  claimed_at       :datetime
+#  error_message    :text
+#  locale           :string(20)
+#  response_code    :integer
+#  status           :integer          default("pending"), not null
+#  trigger_reason   :integer          default("created"), not null
+#  url              :string           not null
+#  created_at       :datetime         not null
+#  updated_at       :datetime         not null
+#  batch_id         :string
+#  retry_of_id      :bigint
+#  topic_id         :bigint
 #
 # Indexes
 #
@@ -49,6 +59,8 @@ end
 #  index_indexnow_submission_logs_on_batch_id_and_batch_index  (batch_id,batch_index)
 #  index_indexnow_submission_logs_on_created_at                (created_at)
 #  index_indexnow_submission_logs_on_status                    (status)
+#  index_indexnow_submission_logs_on_status_and_available_at   (status,available_at)
+#  index_indexnow_submission_logs_on_topic_id_and_status       (topic_id,status)
 #  index_indexnow_submission_logs_on_trigger_reason            (trigger_reason)
 #  index_indexnow_submission_logs_on_url                       (url)
 #

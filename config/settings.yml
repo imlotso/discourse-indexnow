@@ -16,6 +16,13 @@ discourse_index_now:
   indexnow_submit_on_reply:
     default: false
     client: false
+  indexnow_submit_on_reply_edit:
+    default: false
+    client: false
+  indexnow_log_retention_days:
+    default: 0
+    min: 0
+    client: false
   indexnow_url_cooldown_minutes:
     default: 1
     min: 0
@@ -30,7 +37,9 @@ discourse_index_now:
     client: false
   indexnow_hourly_limit:
     default: 200
+    min: 0
     client: false
   indexnow_daily_limit:
     default: 10000
+    min: 0
     client: false

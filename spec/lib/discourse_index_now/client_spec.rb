@@ -61,6 +61,17 @@ describe DiscourseIndexNow::Client do
     )
   end
 
+  it "accepts an HTTP date in Retry-After" do
+    freeze_time(Time.utc(2026, 1, 1, 12, 0, 0)) do
+      response = double(status: 429, headers: { "Retry-After" => "Thu, 01 Jan 2026 12:02:00 GMT" })
+      error = Excon::Error::TooManyRequests.new("Expected [200, 202] <=> Actual: 429")
+      allow(error).to receive(:response).and_return(response)
+      allow(Excon).to receive(:post).and_raise(error)
+
+      expect(described_class.submit_batch(urls)[:retry_after]).to eq(120)
+    end
+  end
+
   it "rejects batches larger than the IndexNow limit" do
     expect { described_class.submit_batch(Array.new(10_001) { |i| "https://example.com/#{i}" }) }
       .to raise_error(DiscourseIndexNow::Client::SubmissionError)
@@ -70,5 +81,11 @@ describe DiscourseIndexNow::Client do
     allow(Excon).to receive(:post).and_raise(Excon::Error::Timeout.new("timed out"))
 
     expect(described_class.submit_batch(urls)).to eq(success: false, error: "timed out")
+  end
+
+  it "converts a proxy connection failure into a retryable result" do
+    allow(Excon).to receive(:post).and_raise(Excon::Error::ProxyConnectionError.new("proxy unavailable"))
+
+    expect(described_class.submit_batch(urls)).to eq(success: false, error: "proxy unavailable")
   end
 end

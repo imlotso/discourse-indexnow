@@ -46,6 +46,24 @@
   width: 100%;
 }
 
+.indexnow-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.indexnow-field > * {
+  min-width: 0;
+}
+
+.indexnow-url-search {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
+  align-items: end;
+}
+
 @media (width <= 700px) {
   .indexnow-backfill-controls {
     grid-template-columns: minmax(0, 1fr);
@@ -128,7 +146,8 @@
 
 .indexnow-chart,
 .indexnow-backfill,
-.indexnow-manual {
+.indexnow-manual,
+.indexnow-batch-progress {
   min-width: 0;
   padding: 0.75rem 1rem;
   border: 1px solid var(--primary-low);
@@ -288,6 +307,7 @@
 
 .indexnow-log-table {
   width: 100%;
+  overflow-wrap: anywhere;
 
   td,
   th {

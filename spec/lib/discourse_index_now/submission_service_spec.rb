@@ -18,7 +18,10 @@ describe DiscourseIndexNow::SubmissionService do
     allow(Jobs).to receive(:enqueue)
   end
 
-  after { Discourse.redis.del(described_class.debounce_key(topic.url)) }
+  after do
+    Discourse.redis.del(described_class.debounce_key(topic.url))
+    Discourse.redis.del(described_class.deferred_key(topic.url)) if described_class.respond_to?(:deferred_key)
+  end
 
   describe "#handle_post_created" do
     it "creates one log per URL in a localized batch" do
@@ -66,7 +69,14 @@ describe DiscourseIndexNow::SubmissionService do
       expect(logs.map(&:url)).to eq([topic.url, "#{topic.url}?tl=es"])
       expect(logs.map(&:locale)).to eq([nil, "es"])
       expect(logs.map(&:trigger_reason)).to eq(%w[created created])
-      expect(Jobs).to have_received(:enqueue).twice
+      logs.each do |log|
+        expect(Jobs).to have_received(:enqueue).with(
+          Jobs::DiscourseIndexNow::SubmitBatch,
+          batch_id: log.batch_id,
+          batch_index: 1,
+          topic_id: topic.id,
+        )
+      end
     end
 
     it "does not duplicate locale URLs when translation is already available" do
@@ -112,6 +122,24 @@ describe DiscourseIndexNow::SubmissionService do
       expect(DiscourseIndexNow::SubmissionLog.first.trigger_reason).to eq("replied")
     end
 
+    it "does not submit a hidden reply" do
+      SiteSetting.indexnow_submit_on_reply = true
+      reply.update!(hidden: true)
+
+      expect { described_class.handle_post_created(reply) }.not_to change(DiscourseIndexNow::SubmissionLog, :count)
+    end
+
+    it "does not interrupt replies in a restricted category" do
+      SiteSetting.indexnow_enabled = false
+      restricted = Fabricate(:topic, category: Fabricate(:category, read_restricted: true))
+      private_reply = Fabricate(:post, topic: restricted, post_number: 2)
+      SiteSetting.indexnow_enabled = true
+      SiteSetting.indexnow_submit_on_reply = true
+
+      expect { described_class.handle_post_created(private_reply) }.not_to raise_error
+      expect(DiscourseIndexNow::SubmissionLog.where(topic_id: restricted.id)).to be_empty
+    end
+
     it "still submits the first post as created, not replied" do
       SiteSetting.indexnow_submit_on_reply = true
 
@@ -125,6 +153,41 @@ describe DiscourseIndexNow::SubmissionService do
     fab!(:reply) { Fabricate(:post, topic: topic, post_number: 2) }
 
     before { SiteSetting.indexnow_submit_on_reply = true }
+
+    it "schedules one trailing submission for activity inside the cooldown" do
+      SiteSetting.indexnow_url_cooldown_minutes = 1
+      deferred = nil
+      allow(Jobs).to receive(:enqueue_in) { |_delay, _job, args| deferred = args }
+      described_class.handle_post_created(reply)
+      DiscourseIndexNow::SubmissionLog.update_all(status: DiscourseIndexNow::SubmissionLog.statuses[:success])
+
+      3.times { described_class.handle_post_created(reply) }
+
+      expect(Jobs).to have_received(:enqueue_in).once
+      expect(DiscourseIndexNow::SubmissionLog.count).to eq(1)
+      Discourse.redis.del(described_class.debounce_key(topic.url))
+      Jobs::DiscourseIndexNow::FlushCooldown.new.execute(deferred)
+      expect(DiscourseIndexNow::SubmissionLog.count).to eq(2)
+    end
+
+    [0, 1].each do |minutes|
+      it "keeps new activity while an earlier submission is processing with a #{minutes}-minute cooldown" do
+        SiteSetting.indexnow_url_cooldown_minutes = minutes
+        deferred = nil
+        allow(Jobs).to receive(:enqueue_in) { |_delay, _job, args| deferred = args }
+        described_class.handle_post_created(reply)
+        DiscourseIndexNow::SubmissionLog.update_all(status: DiscourseIndexNow::SubmissionLog.statuses[:processing])
+        Discourse.redis.del(described_class.debounce_key(topic.url))
+
+        described_class.handle_post_created(reply)
+
+        expect(deferred).to be_present
+        DiscourseIndexNow::SubmissionLog.update_all(status: DiscourseIndexNow::SubmissionLog.statuses[:success])
+        Discourse.redis.del(described_class.debounce_key(topic.url))
+        Jobs::DiscourseIndexNow::FlushCooldown.new.execute(deferred)
+        expect(DiscourseIndexNow::SubmissionLog.count).to eq(2)
+      end
+    end
 
     # Replies to the same crawler page collapse into one submission per window.
     it "collapses repeated activity on one page into a single submission" do
@@ -143,6 +206,7 @@ describe DiscourseIndexNow::SubmissionService do
       described_class.handle_post_created(reply)
 
       later = Fabricate(:post, topic: topic, post_number: TopicView.chunk_size + 5)
+      allow(DiscourseIndexNow::UrlBuilder).to receive(:page_for).with(later).and_return(2)
       described_class.handle_post_created(later)
 
       expect(DiscourseIndexNow::SubmissionLog.order(:id).pluck(:url)).to eq(
@@ -182,6 +246,38 @@ describe DiscourseIndexNow::SubmissionService do
   end
 
   describe "#handle_post_edited" do
+    it "does not interrupt editing a reply in a restricted category" do
+      SiteSetting.indexnow_enabled = false
+      restricted = Fabricate(:topic, category: Fabricate(:category, read_restricted: true))
+      private_reply = Fabricate(:post, topic: restricted, post_number: 2)
+      SiteSetting.indexnow_enabled = true
+      SiteSetting.indexnow_submit_on_reply_edit = true
+
+      expect { described_class.handle_post_edited(private_reply, false) }.not_to raise_error
+      expect(DiscourseIndexNow::SubmissionLog.where(topic_id: restricted.id)).to be_empty
+    end
+
+    it "ignores an access change while calculating a reply page" do
+      reply = Fabricate(:post, topic: topic, post_number: 2)
+      SiteSetting.indexnow_submit_on_reply_edit = true
+      allow(DiscourseIndexNow::UrlBuilder).to receive(:page_for).and_raise(Discourse::InvalidAccess)
+
+      expect { described_class.handle_post_edited(reply, false) }.not_to raise_error
+      expect(DiscourseIndexNow::SubmissionLog.count).to eq(0)
+    end
+
+    it "submits an edited reply when the separate reply-edit setting is enabled" do
+      reply = Fabricate(:post, topic: topic, post_number: 2)
+      SiteSetting.indexnow_submit_on_reply_edit = true
+      SiteSetting.indexnow_submit_on_edit = false
+
+      described_class.handle_post_edited(reply, false)
+
+      log = DiscourseIndexNow::SubmissionLog.find_by!(url: topic.url)
+      expect(log.trigger_reason).to eq("reply_edited")
+      expect(log.topic_id).to eq(topic.id)
+    end
+
     it "does not submit ordinary non-first-post edits" do
       reply = Fabricate(:post, topic: topic, post_number: 2)
 
@@ -254,6 +350,15 @@ describe DiscourseIndexNow::SubmissionService do
   end
 
   describe "#handle_topic_destroyed" do
+    it "queues a deletion notice even when an earlier submission is processing" do
+      DiscourseIndexNow::SubmissionLog.create!(url: topic.url, topic_id: topic.id, status: :processing)
+      topic.update!(deleted_at: Time.zone.now)
+
+      described_class.handle_topic_destroyed(topic)
+
+      expect(DiscourseIndexNow::SubmissionLog.where(url: topic.url, trigger_reason: :deleted, status: :pending)).to exist
+    end
+
     it "marks stale pending URLs failed and submits all topic URLs for deletion" do
       allow(ContentLocalization).to receive(:crawler_locale_param_enabled?).and_return(true)
       Fabricate(:topic_localization, topic: topic, locale: "es")
@@ -273,7 +378,7 @@ describe DiscourseIndexNow::SubmissionService do
       expect(deletion_logs).to all(be_pending)
       expect(Jobs).to have_received(:enqueue).with(
         Jobs::DiscourseIndexNow::SubmitBatch,
-        { batch_id: deletion_logs.first.batch_id, batch_index: 1, topic_id: nil },
+        { batch_id: deletion_logs.first.batch_id, batch_index: 1, topic_id: topic.id },
       )
     end
 
