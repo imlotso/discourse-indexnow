@@ -158,9 +158,8 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
     return breakdown.map((item) => ({
       ...item,
       label: i18n(`discourse_index_now.admin.failure_${item.category}`),
-      width: Math.max(2, Math.round((item.count / max) * 180)),
       style: trustHTML(
-        `width: ${Math.max(2, Math.round((item.count / max) * 180))}px`
+        `width: ${Math.max(2, Math.round((item.count / max) * 100))}%`
       ),
     }));
   }
@@ -266,6 +265,22 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
     }
 
     return params;
+  }
+
+  get logRequestParams() {
+    return { page: this.page, per_page: PER_PAGE, ...this.logFilterParams };
+  }
+
+  resetLogFilters(batchId) {
+    this.status = "";
+    this.url = "";
+    this.triggerReason = "";
+    this.responseCode = "";
+    this.logLocale = "";
+    this.logSince = "";
+    this.logUntil = "";
+    this.batchId = batchId;
+    this.page = 1;
   }
 
   /**
@@ -444,16 +459,9 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
     const sequence = ++this.loadSequence;
     this.loading = true;
 
-    const data = {
-      page: this.page,
-      per_page: PER_PAGE,
-    };
-
-    Object.assign(data, this.logFilterParams);
-
     try {
       const result = await ajax("/admin/plugins/discourse-indexnow/logs.json", {
-        data,
+        data: this.logRequestParams,
       });
       if (sequence === this.loadSequence) {
         this.data = result;
@@ -564,16 +572,8 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
   async openBatch(result) {
     this.stopBatchPolling();
     this.batchPollingEnabled = true;
-    this.status = "";
-    this.url = "";
-    this.triggerReason = "";
-    this.responseCode = "";
-    this.logLocale = "";
-    this.logSince = "";
-    this.logUntil = "";
-    this.batchId = result.batch_id;
+    this.resetLogFilters(result.batch_id);
     this.batchProgress = result;
-    this.page = 1;
     await this.load();
     await this.refreshBatch();
   }
@@ -652,8 +652,7 @@ export default class AdminPluginsShowDiscourseIndexNowLogsController extends Con
       );
       this.stopBatchPolling();
       this.batchProgress = null;
-      this.batchId = this.manualResult.batch_id;
-      this.page = 1;
+      this.resetLogFilters(this.manualResult.batch_id);
       await this.load();
     } catch (error) {
       popupAjaxError(error);

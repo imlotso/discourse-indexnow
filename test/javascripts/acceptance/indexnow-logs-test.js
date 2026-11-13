@@ -67,6 +67,9 @@ acceptance("IndexNow admin logs", function (needs) {
       backfillRequested = true;
       return helper.response({ batch_id: "test-batch", status: "queued" });
     });
+    server.post("/admin/plugins/discourse-indexnow/submit_urls.json", () =>
+      helper.response({ batch_id: "manual-batch", submitted_urls: 1 })
+    );
     server.post(
       "/admin/plugins/discourse-indexnow/retry_failed.json",
       (request) => {
@@ -149,5 +152,31 @@ acceptance("IndexNow admin logs", function (needs) {
     await click(".indexnow-view-batch");
 
     assert.dom(".indexnow-batch-progress").includesText("test-batch");
+  });
+
+  test("reloads the displayed filters when returning to the logs page", async function (assert) {
+    await visit("/admin/plugins/discourse-indexnow/indexnow-logs");
+    await fillIn("#indexnow-filter-url", "example.com/t/one");
+    await click(".indexnow-search-button");
+    await visit("/");
+    await visit("/admin/plugins/discourse-indexnow/indexnow-logs");
+
+    assert.dom("#indexnow-filter-url").hasValue("example.com/t/one");
+    assert.strictEqual(lastLogsRequest.queryParams.url, "example.com/t/one");
+  });
+
+  test("shows a new manual batch without unrelated log filters", async function (assert) {
+    await visit("/admin/plugins/discourse-indexnow/indexnow-logs");
+    await fillIn("#indexnow-filter-url", "old-topic");
+    await fillIn("#indexnow-filter-response", "403");
+    await click(".indexnow-search-button");
+    await fillIn("#indexnow-manual-urls", "https://example.com/categories");
+    await click(".indexnow-manual-controls button");
+
+    assert.strictEqual(lastLogsRequest.queryParams.batch_id, "manual-batch");
+    assert.strictEqual(lastLogsRequest.queryParams.url, undefined);
+    assert.strictEqual(lastLogsRequest.queryParams.response_code, undefined);
+    assert.dom("#indexnow-filter-url").hasValue("");
+    assert.dom("#indexnow-filter-response").hasValue("");
   });
 });
