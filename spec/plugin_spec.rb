@@ -213,4 +213,20 @@ describe ::DiscourseIndexNow do
         "#{(referenced - translations.keys).join(', ')}"
     end
   end
+
+  it "keeps the English and simplified Chinese translation keys in sync" do
+    root = Rails.root.join("plugins/discourse-indexnow/config/locales")
+    flatten_keys = lambda do |values, prefix = []|
+      values.flat_map do |key, value|
+        path = prefix + [key.to_s]
+        value.is_a?(Hash) ? flatten_keys.call(value, path) : [path.join(".")]
+      end
+    end
+
+    %w[client server].each do |scope|
+      english = YAML.load_file(root.join("#{scope}.en.yml")).fetch("en")
+      chinese = YAML.load_file(root.join("#{scope}.zh_CN.yml")).fetch("zh_CN")
+      expect(flatten_keys.call(chinese)).to match_array(flatten_keys.call(english))
+    end
+  end
 end
