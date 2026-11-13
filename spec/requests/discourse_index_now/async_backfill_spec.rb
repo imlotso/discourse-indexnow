@@ -40,7 +40,7 @@ describe "IndexNow asynchronous backfill", type: :request do
 
   it "generates more than one full-sized chunk and reports its progress" do
     now = Time.zone.now
-    rows = Array.new(Jobs::DiscourseIndexNow::GenerateBatch::CHUNK_SIZE + 1) do |index|
+    rows = Array.new(Jobs::DiscourseIndexNow::GenerateBatch::CHUNK_SIZE) do |index|
       {
         title: "Backfill topic #{index}",
         slug: "backfill-topic-#{index}",
@@ -53,6 +53,7 @@ describe "IndexNow asynchronous backfill", type: :request do
       }
     end
     Topic.insert_all!(rows)
+    expected_count = rows.size + 1 # The topic fixture belongs to this category too.
 
     post "/admin/plugins/discourse-indexnow/backfill_async.json", params: { category_id: category.id }
     batch_id = response.parsed_body["batch_id"]
@@ -63,9 +64,9 @@ describe "IndexNow asynchronous backfill", type: :request do
 
     get "/admin/plugins/discourse-indexnow/batches/#{batch_id}.json"
     expect(response.parsed_body).to include(
-      "matched_count" => rows.size,
-      "processed_count" => rows.size,
-      "queued_count" => rows.size,
+      "matched_count" => expected_count,
+      "processed_count" => expected_count,
+      "queued_count" => expected_count,
       "skipped_count" => 0,
       "status" => "running",
     )
