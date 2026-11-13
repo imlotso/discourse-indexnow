@@ -10,11 +10,13 @@ acceptance("IndexNow admin logs", function (needs) {
   let lastLogsRequest;
   let backfillRequested;
   let retryRequest;
+  let successResponseCode;
 
   needs.hooks.beforeEach(() => {
     lastLogsRequest = null;
     backfillRequested = false;
     retryRequest = null;
+    successResponseCode = 202;
   });
 
   needs.pretender((server, helper) => {
@@ -40,7 +42,7 @@ acceptance("IndexNow admin logs", function (needs) {
             id: 1,
             url: "https://example.com/t/one/1",
             status: "success",
-            response_code: 202,
+            response_code: successResponseCode,
             trigger_reason: "created",
             created_at: "2026-01-01T00:00:00Z",
           },
@@ -92,6 +94,16 @@ acceptance("IndexNow admin logs", function (needs) {
     assert
       .dom(".indexnow-status-success")
       .hasText(i18n("discourse_index_now.admin.status_accepted_202"));
+    assert.dom(".indexnow-indexing-note").exists();
+  });
+
+  test("shows a 200 response as received without claiming it was indexed", async function (assert) {
+    successResponseCode = 200;
+    await visit("/admin/plugins/discourse-indexnow/indexnow-logs");
+
+    assert
+      .dom(".indexnow-status-success")
+      .hasText(i18n("discourse_index_now.admin.status_success"));
     assert.dom(".indexnow-indexing-note").exists();
   });
 
