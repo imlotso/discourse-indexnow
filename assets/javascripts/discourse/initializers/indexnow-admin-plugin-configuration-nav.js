@@ -64,6 +64,7 @@ export default {
           {
             label: "discourse_index_now.admin.logs",
             route: LOGS_ROUTE,
+            description: "discourse_index_now.admin.logs_description",
           },
         ]);
       });

@@ -2,6 +2,7 @@
 
 require "json"
 require "excon"
+require "time"
 
 module DiscourseIndexNow
   class Client
@@ -35,7 +36,7 @@ module DiscourseIndexNow
       result = { success: false, status: status, error: "HTTP #{status}" }
       result[:retry_after] = retry_after(e.response) if status == 429
       result
-    rescue Excon::Error::Timeout, Excon::Error::Socket => e
+    rescue Excon::Error => e
       { success: false, error: e.message }
     end
 
@@ -51,8 +52,17 @@ module DiscourseIndexNow
 
     def self.retry_after(response)
       value = response.headers["Retry-After"] || response.headers["retry-after"]
-      seconds = value.to_i
+      return if value.nil? || value.to_s.empty?
+
+      seconds = Integer(value, 10)
       seconds.positive? ? seconds : nil
+    rescue ArgumentError, TypeError
+      begin
+        seconds = (Time.httpdate(value) - Time.now).ceil
+        seconds.positive? ? seconds : nil
+      rescue ArgumentError, TypeError
+        nil
+      end
     end
   end
 end

@@ -63,19 +63,21 @@ describe Jobs::DiscourseIndexNow::SubmitBatch do
     logs.each { |log| expect(log.reload).to be_cancelled }
   end
 
-  it "marks logs failed and raises after a failed batch submission" do
+  it "schedules a retry after a rate-limited batch submission" do
     allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(
       success: false,
       status: 429,
       error: "HTTP 429",
     )
 
-    expect {
-      described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
-    }.to raise_error(DiscourseIndexNow::Client::SubmissionError)
+    allow(Jobs).to receive(:enqueue_in)
 
-    logs.each { |log| expect(log.reload).to be_failed }
+    described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
+
+    logs.each { |log| expect(log.reload).to be_retrying }
     expect(logs.first.error_message).to eq("HTTP 429")
+    expect(logs.first.attempt_count).to eq(1)
+    expect(Jobs).to have_received(:enqueue_in)
   end
 
   it "sets the throttle when IndexNow returns Retry-After" do
@@ -86,11 +88,66 @@ describe Jobs::DiscourseIndexNow::SubmitBatch do
       retry_after: 120,
     )
 
-    expect {
-      described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
-    }.to raise_error(DiscourseIndexNow::Client::SubmissionError)
+    allow(Jobs).to receive(:enqueue_in)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
 
     expect(DiscourseIndexNow::Throttle).to be_throttled
+  end
+
+  it "marks a permanent HTTP error failed without scheduling a retry" do
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(
+      success: false,
+      status: 403,
+      error: "HTTP 403",
+    )
+    allow(Jobs).to receive(:enqueue_in)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
+
+    expect(logs.map { |log| log.reload.status }).to eq(%w[failed failed])
+    expect(Jobs).not_to have_received(:enqueue_in)
+  end
+
+  it "retries an HTTP request timeout" do
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(
+      success: false,
+      status: 408,
+      error: "HTTP 408",
+    )
+    allow(Jobs).to receive(:enqueue_in)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
+
+    expect(logs.map { |log| log.reload.status }).to eq(%w[retrying retrying])
+    expect(Jobs).to have_received(:enqueue_in)
+  end
+
+  it "marks a transient failure final after five retries" do
+    logs.each { |log| log.update!(attempt_count: 5) }
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(
+      success: false,
+      status: 503,
+      error: "HTTP 503",
+    )
+    allow(Jobs).to receive(:enqueue_in)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
+
+    expect(logs.map { |log| log.reload.status }).to eq(%w[failed failed])
+    expect(Jobs).not_to have_received(:enqueue_in)
+  end
+
+  it "does not reschedule indefinitely when a configured limit is zero" do
+    SiteSetting.indexnow_hourly_limit = 0
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch)
+    allow(Jobs).to receive(:enqueue_in)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
+
+    expect(DiscourseIndexNow::Client).not_to have_received(:submit_batch)
+    expect(Jobs).not_to have_received(:enqueue_in)
+    expect(logs.map { |log| log.reload.status }).to eq(%w[pending pending])
   end
 
   it "submits only the remaining capacity and reschedules the rest" do
@@ -153,6 +210,27 @@ describe Jobs::DiscourseIndexNow::SubmitBatch do
     backfill_logs.each { |log| expect(log.reload).to be_success }
   end
 
+  it "continues a batch after the current worker's bounded claim" do
+    stub_const(described_class, :CLAIM_LIMIT, 2) do
+      extra = DiscourseIndexNow::SubmissionLog.create!(
+        url: "#{topic.url}?page=2",
+        topic_id: topic.id,
+        batch_id: batch_id,
+        batch_index: 1,
+        status: :pending,
+      )
+      allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(success: true, status: 200)
+      allow(Jobs).to receive(:enqueue_in)
+
+      described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
+      expect(Jobs).to have_received(:enqueue_in)
+      expect(DiscourseIndexNow::SubmissionLog.where(batch_id: batch_id, status: :pending).count).to eq(1)
+
+      described_class.new.execute(batch_id: batch_id, batch_index: 1, topic_id: topic.id)
+      expect((logs + [extra]).map { |log| log.reload.status }).to eq(%w[success success success])
+    end
+  end
+
   it "fails the batch when the topic becomes ineligible" do
     SiteSetting.indexnow_excluded_category_ids = topic.category_id.to_s
     allow(DiscourseIndexNow::Client).to receive(:submit_batch)
@@ -161,5 +239,71 @@ describe Jobs::DiscourseIndexNow::SubmitBatch do
 
     expect(DiscourseIndexNow::Client).not_to have_received(:submit_batch)
     logs.each { |log| expect(log.reload.error_message).to eq("ineligible_at_execution") }
+  end
+
+  it "rechecks topic eligibility for a legacy backfill without a topic id" do
+    SiteSetting.indexnow_excluded_category_ids = topic.category_id.to_s
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(success: true, status: 200)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1)
+
+    expect(DiscourseIndexNow::Client).not_to have_received(:submit_batch)
+    expect(logs.map { |log| log.reload.status }).to eq(%w[failed failed])
+  end
+
+  it "does not retry records invalidated by a category restriction" do
+    logs.each { |log| log.update!(status: :failed, error_message: "category_restricted") }
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(success: true, status: 200)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1)
+
+    expect(DiscourseIndexNow::Client).not_to have_received(:submit_batch)
+    expect(logs.map { |log| log.reload.error_message }).to eq(%w[category_restricted category_restricted])
+  end
+
+  it "does not send records already claimed by another worker" do
+    logs.each { |log| log.update!(status: :processing, claim_token: "other", claimed_at: Time.zone.now) }
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1)
+
+    expect(DiscourseIndexNow::Client).not_to have_received(:submit_batch)
+    expect(logs.map { |log| log.reload.status }).to eq(%w[processing processing])
+  end
+
+  it "checks each topic in a mixed batch independently" do
+    restricted_category = Fabricate(:category, read_restricted: true)
+    restricted_topic = Fabricate(:topic, category: restricted_category)
+    logs.first.update!(topic_id: topic.id)
+    logs.second.update!(url: restricted_topic.url, topic_id: restricted_topic.id)
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(success: true, status: 200)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1)
+
+    expect(DiscourseIndexNow::Client).to have_received(:submit_batch).with([topic.url])
+    expect(logs.first.reload).to be_success
+    expect(logs.second.reload).to be_failed
+  end
+
+  it "rejects a URL whose topic does not match its stored identity" do
+    restricted_topic = Fabricate(:topic, category: Fabricate(:category, read_restricted: true))
+    logs.each { |log| log.update!(url: restricted_topic.url, topic_id: topic.id) }
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1)
+
+    expect(DiscourseIndexNow::Client).not_to have_received(:submit_batch)
+    expect(logs.map { |log| log.reload.status }).to eq(%w[failed failed])
+  end
+
+  it "submits a deletion notice for a previously public topic" do
+    topic.update!(deleted_at: Time.zone.now)
+    logs.each { |log| log.update!(topic_id: topic.id, trigger_reason: :deleted) }
+    allow(DiscourseIndexNow::Client).to receive(:submit_batch).and_return(success: true, status: 200)
+
+    described_class.new.execute(batch_id: batch_id, batch_index: 1)
+
+    expect(DiscourseIndexNow::Client).to have_received(:submit_batch).once
+    expect(logs.map { |log| log.reload.status }).to eq(%w[success success])
   end
 end

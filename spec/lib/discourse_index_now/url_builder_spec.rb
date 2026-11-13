@@ -37,6 +37,13 @@ describe DiscourseIndexNow::UrlBuilder do
   end
 
   describe ".page_for" do
+    it "uses the anonymous crawler page when earlier posts were deleted" do
+      posts = (1..21).map { |number| Fabricate(:post, topic: topic, post_number: number) }
+      posts[1].update!(deleted_at: Time.zone.now)
+
+      expect(described_class.page_for(posts.last)).to eq(1)
+    end
+
     it "maps post numbers onto crawler pages the way TopicView does" do
       size = TopicView.chunk_size
 

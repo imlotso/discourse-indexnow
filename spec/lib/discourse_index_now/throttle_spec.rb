@@ -81,6 +81,37 @@ describe DiscourseIndexNow::Throttle do
     end
   end
 
+  describe ".reserve!" do
+    it "atomically shares the remaining capacity between concurrent workers" do
+      SiteSetting.indexnow_hourly_limit = 1
+      expect(described_class).to respond_to(:reserve!)
+
+      ready = Queue.new
+      start = Queue.new
+      workers = Array.new(2) do
+        Thread.new do
+          ready << true
+          start.pop
+          described_class.reserve!(1)
+        end
+      end
+      2.times { ready.pop }
+      2.times { start << true }
+
+      expect(workers.map(&:value).sort).to eq([0, 1])
+      expect(described_class.hourly_used).to eq(1)
+    end
+
+    it "reserves only the capacity that remains" do
+      SiteSetting.indexnow_hourly_limit = 3
+      expect(described_class).to respond_to(:reserve!)
+
+      expect(described_class.reserve!(5)).to eq(3)
+      expect(described_class.hourly_used).to eq(3)
+      expect(described_class.daily_used).to eq(3)
+    end
+  end
+
   describe ".frees_in" do
     it "counts down to the moment the oldest spend ages out" do
       freeze_time(Time.zone.parse("2026-03-04 10:00:00")) { described_class.record_submission!(200) }
@@ -138,6 +169,15 @@ describe DiscourseIndexNow::Throttle do
   end
 
   describe ".usage" do
+    it "does not shorten an existing IndexNow backoff" do
+      freeze_time do
+        described_class.throttle_until!(120.seconds.from_now)
+        described_class.throttle_until!(30.seconds.from_now)
+
+        expect(described_class.retry_delay).to eq(120)
+      end
+    end
+
     it "reports the counters the throttle actually gates on" do
       described_class.record_submission!(7)
 

@@ -10,6 +10,7 @@ Automatically submit Discourse topic URLs to the [IndexNow](https://www.indexnow
 
 - Submit new public topics and topic-changing edits automatically.
 - Submit the paginated URL automatically on new replies (with configurable per-URL cooldown).
+- Optionally submit the affected crawler page when an existing reply is edited.
 - Submit topic URLs when a topic is destroyed so IndexNow-aware engines can recheck them and remove them faster.
 - Include localized topic URLs when Discourse Content Localization and its crawler locale parameter are enabled.
 - Submit localized URLs when a translation is created, including translations completed after the initial topic submission.
@@ -20,7 +21,8 @@ Automatically submit Discourse topic URLs to the [IndexNow](https://www.indexnow
 - Verify that `/<key>.txt` is publicly accessible from the admin panel.
 - Re-submit or exclude content when topics move, categories change visibility, or tags update.
 - Track batch IDs, locales, a seven-day success trend, and categorized failure reasons.
-- Preview and submit historical topics by category and date range from the admin panel.
+- Preview and submit historical topics in background batches, with progress and cancellation.
+- Filter logs, retry final failures, and optionally remove old completed logs.
 - Submit manually chosen URLs from the admin panel, one per line.
 - Keep all submissions asynchronous and privacy-aware.
 - Provide English and Simplified Chinese admin interfaces.
@@ -33,13 +35,17 @@ Automatically submit Discourse topic URLs to the [IndexNow](https://www.indexnow
 
 ## Installation
 
-1. Install the plugin in your Discourse container:
-   ```sh
-   cd /var/discourse
-   ./launcher enter app
-   bash -c "cd plugins && git clone https://github.com/imlotso/discourse-indexnow.git"
-   exit
+1. Add the plugin to the existing `after_code` section of `/var/discourse/containers/app.yml`:
+   ```yaml
+   hooks:
+     after_code:
+       - exec:
+           cd: $home/plugins
+           cmd:
+             - git clone https://github.com/discourse/docker_manager.git
+             - git clone https://github.com/imlotso/discourse-indexnow.git
    ```
+   Keep your existing plugin entries and follow their indentation and command style. See the [official installation guide](https://meta.discourse.org/t/install-plugins-on-a-self-hosted-site/19157).
 2. Rebuild the container:
    ```sh
    cd /var/discourse
@@ -63,6 +69,8 @@ Automatically submit Discourse topic URLs to the [IndexNow](https://www.indexnow
 | `indexnow_submit_on_create` | `true` | Submit when a new topic is published. |
 | `indexnow_submit_on_edit` | `true` | Resubmit when first post or topic attributes change. |
 | `indexnow_submit_on_reply` | `false` | Submit the paginated URL on new reply. |
+| `indexnow_submit_on_reply_edit` | `false` | Submit the affected crawler page after an existing public reply is edited. |
+| `indexnow_log_retention_days` | `0` | Days to keep completed logs; `0` disables automatic cleanup. |
 | `indexnow_url_cooldown_minutes` | `1` | Per-URL cooldown (minutes) to prevent spamming. |
 | `indexnow_excluded_category_ids` | `""` | Additional categories to exclude. |
 | `indexnow_excluded_tag_names` | `""` | Additional tags to exclude. |
@@ -73,8 +81,10 @@ The plugin refuses to enable if the site requires login, and automatically disab
 
 The `submit on create` and `submit on edit` settings govern automatic submissions for new and edited topics only. Historical backfilling and manual submission are separate admin actions:
 
-- **Historical backfill:** Filter topics by category and date range, preview the matches, and bulk submit eligible historical topics.
-- **Manual submission:** Paste URLs, one per line, to submit specific links instantly. External URLs and ineligible topic URLs are filtered out.
+- **Historical backfill:** Filter topics by category and date range, preview the matches, then start a background batch. Progress and cancellation are available on the Logs page; enter the batch ID to view progress again later.
+- **Manual submission:** Paste URLs, one per line, to queue specific links. External URLs and ineligible topic URLs are filtered out. For non-topic URLs, submit only pages intended to be public.
+
+Backfill and log date ranges use the Discourse application time zone (normally UTC), and include both selected dates.
 
 ## Localized URLs
 
@@ -86,7 +96,9 @@ All eligible URLs share a single batch ID in the logs. This keeps the main URL a
 
 The plugin attempts to send the `urlList` array in a single request whenever possible. Logical batches larger than 10,000 URLs are split automatically and tracked with a batch index.
 
-Redis counters enforce hourly and daily limits. IndexNow 429 responses set a global throttle deadline using `Retry-After` when provided; otherwise the job uses an increasing retry delay. Rate-limited submissions are recorded as failures with `rate_limit_exceeded`.
+Redis atomically reserves the hourly and daily allowance before sending, including attempts that fail or time out. A limit of `0` pauses submissions until the setting is raised. A 429 response honors `Retry-After`; transient failures are retried up to five times, while permanent request and key errors are recorded as final failures.
+
+HTTP 200 means the engine received the submission. HTTP 202 means it received the submission while key validation was pending at the time of the response. Neither status confirms that the URL was crawled or indexed, and the plugin cannot track the later outcome of that validation.
 
 ## Admin panel
 
@@ -94,20 +106,33 @@ The panel under **Admin > Plugins > discourse-indexnow** includes:
 
 - Plugin and key status.
 - Cached public accessibility state for `/<key>.txt`.
-- Today's success and failure counts.
+- Today's received and failed counts.
 - Quota bars showing current usage and time until capacity frees up.
 - A seven-day success and failure trend.
 - Failure breakdowns for rate limits, key errors, domain mismatches, and other errors.
-- Historical backfill preview and submission by category and date range.
+- Historical backfill preview, background progress, and cancellation by category and date range.
 - Manual URL submission with one URL per line.
-- Batch-aware logs with URL, locale, status, trigger reason, response code, and error filters.
+- Batch-aware logs filtered by URL, locale, status, trigger reason, response code, and date, with individual and filtered retries for final failures.
+- Optional cleanup of old terminal logs; pending, processing, and retrying work is retained.
 - Pagination and one-click key generation.
 
 The page works through both Ember navigation and direct browser visits or hard refreshes.
 
+## Admin API
+
+All endpoints require an administrator and use the `/admin/plugins/discourse-indexnow` prefix.
+
+- `GET /logs.json` accepts `status`, `url`, `batch_id`, `trigger_reason`, `response_code`, `locale`, `since`, and `until` filters, plus pagination.
+- `POST /backfill_async.json` accepts `category_id`, `since`, and `until`, and returns HTTP 202 with `batch_id` and `status`.
+- `POST /retry_failed.json` accepts the log filters and optionally `log_ids[]`; it queues only matching final failures and returns HTTP 202 with a new batch ID.
+- `GET /batches/:batch_id.json` returns batch status, matched/processed/queued/skipped counts, terminal status counts, the next generation retry time, and any generation error.
+- `POST /cancel_pending.json` with only `batch_id` cancels batch generation and its pending or retrying logs. Additional filters restrict cancellation to matching logs.
+
+The existing synchronous-generation `POST /backfill.json` endpoint remains available for compatibility. The admin page uses the asynchronous endpoint.
+
 ## Privacy and safety
 
-Submissions are filtered before enqueueing and re-checked inside the job. The plugin excludes:
+Topic submissions are filtered before enqueueing and re-checked inside the job. The plugin excludes:
 
 - Sites requiring login.
 - Private messages.
@@ -115,6 +140,8 @@ Submissions are filtered before enqueueing and re-checked inside the job. The pl
 - Unlisted topics, and deleted topics outside the deletion notification event.
 - Categories in `indexnow_excluded_category_ids`.
 - Topics carrying a tag in `indexnow_excluded_tag_names`.
+
+Manual same-site non-topic URLs remain supported; administrators should only submit pages intended to be public. Cancellation prevents pending work from being sent, but cannot recall a request that has already left the server.
 
 The key route is intentionally public, returns 404 for unknown keys, and is limited to 100 requests per minute per IP. Generating a new key immediately invalidates the previous key.
 
@@ -128,10 +155,12 @@ The key route is intentionally public, returns 404 for unknown keys, and is limi
 From a Discourse development checkout:
 
 ```sh
-bundle exec rspec plugins/discourse-indexnow/spec
+bundle exec rspec plugins/discourse-indexnow/spec --exclude-pattern 'plugins/discourse-indexnow/spec/system/**/*_spec.rb'
+bundle exec rspec plugins/discourse-indexnow/spec/system
+bin/rake 'plugin:qunit[discourse-indexnow]'
 ```
 
-CI runs the official Discourse plugin workflow on every push and pull request.
+System and QUnit tests require the browser dependencies and built frontend assets used by the Discourse test environment. CI runs the official Discourse plugin workflow against `tests-passed` and the `v2026.10.1` stable tag on pushes and pull requests. Frontend tests and JS/CSS linting are included.
 
 ## License
 

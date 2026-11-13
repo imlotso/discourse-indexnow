@@ -11,10 +11,7 @@ module DiscourseIndexNow
       page = [params[:page].to_i, 1].max
       per_page = [[params[:per_page].to_i, 1].max, 50].min
 
-      scope = SubmissionLog.order(created_at: :desc)
-      scope = scope.where(status: status_value) unless status_value.nil?
-      scope = scope.where("url ILIKE ?", "%#{url_filter}%") if url_filter.present?
-      scope = scope.where(batch_id: batch_id_filter) if batch_id_filter.present?
+      scope = filtered_logs.order(created_at: :desc)
 
       total_count = scope.count
       logs = scope.limit(per_page).offset((page - 1) * per_page)
@@ -32,12 +29,36 @@ module DiscourseIndexNow
     end
 
     def cancel_pending
-      cancelled_count =
-        filtered_logs.where(status: :pending).update_all(
-          status: SubmissionLog.statuses[:cancelled],
-          error_message: "cancelled_by_admin",
-          updated_at: Time.zone.now,
+      filter = LogFilter.new(params)
+      values = filter.to_h.with_indifferent_access
+      cancel_batch = values[:batch_id].present? && values.except(:batch_id, :status).empty? &&
+        (values[:status].blank? || %w[pending retrying].include?(values[:status]))
+      cancelled_count = 0
+      Batch.transaction do
+        if cancel_batch
+          batch = Batch.lock.find_by(batch_id: values[:batch_id])
+          cancellable = batch && (
+            %w[queued running].include?(batch.status) ||
+              (batch.status == "generated" && filter.apply.where(status: %i[pending retrying processing]).exists?)
+          )
+          batch.update!(status: "cancelled") if cancellable
+        end
+        # A request already in flight may finish, but it must not schedule a
+        # further attempt. Update all three active states in one statement so a
+        # worker cannot move between states between separate cancellation queries.
+        cancelled_count = filter.apply.where(status: %i[pending retrying processing], cancel_requested: false).update_all(
+          [
+            "status = CASE WHEN status = ? THEN status ELSE ? END, " \
+              "cancel_requested = TRUE, " \
+              "error_message = CASE WHEN status = ? THEN error_message ELSE ? END, updated_at = ?",
+            SubmissionLog.statuses[:processing],
+            SubmissionLog.statuses[:cancelled],
+            SubmissionLog.statuses[:processing],
+            "cancelled_by_admin",
+            Time.zone.now,
+          ],
         )
+      end
 
       render json: { cancelled_count: cancelled_count }
     end
@@ -57,18 +78,24 @@ module DiscourseIndexNow
 
     def backfill_preview
       topics = backfill_topics
-      entries = topics.flat_map { |topic| UrlBuilder.build_urls(topic) }
+      matched_count = topics.count
+      locale_count = 0
+      if ::ContentLocalization.crawler_locale_param_enabled?
+        localized = TopicLocalization.where(topic_id: topics.reorder(nil).select(:id)).where.not(locale: nil).select(:topic_id, :locale).distinct
+        locale_count = TopicLocalization.unscoped.from(localized, :indexnow_localizations).count
+      end
+      entries = topics.limit(100).flat_map { |topic| UrlBuilder.build_urls(topic) }.first(100)
 
       render json: {
-               matched_topics: topics.size,
-               url_count: entries.size,
-               urls: entries.first(100).map { |entry| entry[:url] },
+               matched_topics: matched_count,
+               url_count: matched_count + locale_count,
+               urls: entries.map { |entry| entry[:url] },
              }
     end
 
     def backfill
       topics = backfill_topics
-      entries = topics.flat_map { |topic| UrlBuilder.build_urls(topic) }
+      entries = topics.flat_map { |topic| UrlBuilder.build_urls(topic).map { |entry| entry.merge(topic_id: topic.id) } }
       result =
         SubmissionService.enqueue_batch(
           entries,
@@ -83,6 +110,61 @@ module DiscourseIndexNow
              }
     end
 
+    def backfill_async
+      query = BackfillQuery.new(params)
+      topics = query.scope
+      batch = Batch.create!(
+        batch_id: SecureRandom.uuid,
+        kind: "backfill",
+        filters: query.to_h,
+        snapshot_max_id: topics.maximum(:id) || 0,
+        matched_count: topics.count,
+      )
+      Jobs.enqueue(Jobs::DiscourseIndexNow::GenerateBatch, batch_id: batch.batch_id)
+      render json: { batch_id: batch.batch_id, status: batch.status }, status: :accepted
+    end
+
+    def retry_failed
+      filter = LogFilter.new(params)
+      ids = params[:log_ids]
+      if params.key?(:log_ids)
+        unless ids.is_a?(Array) && ids.present? && ids.size <= 10_000 && ids.all? { |id| id.to_s.match?(/\A[1-9]\d*\z/) }
+          raise Discourse::InvalidParameters.new(:log_ids)
+        end
+        ids = ids.map(&:to_i).uniq
+      end
+
+      scope = filter.apply.where(status: :failed)
+      scope = scope.where(id: ids) if ids.present?
+      filters = filter.to_h
+      filters["log_ids"] = ids if ids.present?
+      batch = Batch.create!(
+        batch_id: SecureRandom.uuid,
+        kind: "retry",
+        filters: filters,
+        snapshot_max_id: scope.maximum(:id) || 0,
+        matched_count: scope.count,
+      )
+      Jobs.enqueue(Jobs::DiscourseIndexNow::GenerateBatch, batch_id: batch.batch_id)
+      render json: { batch_id: batch.batch_id, status: batch.status }, status: :accepted
+    end
+
+    def batch_status
+      batch = Batch.find_by!(batch_id: params[:batch_id])
+      render json: {
+        batch_id: batch.batch_id,
+        kind: batch.kind,
+        status: batch.display_status,
+        matched_count: batch.matched_count,
+        processed_count: batch.processed_count,
+        queued_count: batch.queued_count,
+        skipped_count: batch.skipped_count,
+        status_counts: SubmissionLog.where(batch_id: batch.batch_id).group(:status).count,
+        retry_at: batch.retry_at,
+        error_message: batch.error_message,
+      }
+    end
+
     def submit_urls
       lines = manual_url_lines(params[:urls])
       if lines.size > SubmissionService::BATCH_SIZE
@@ -92,7 +174,12 @@ module DiscourseIndexNow
       urls = valid_manual_urls(lines)
       return render_manual_url_error if urls.empty?
 
-      entries = urls.map { |url| { url: url, locale: nil } }
+      entries = urls.map do |url|
+        entry = { url: url, locale: nil }
+        topic_id = Eligibility.topic_id_for_url(url)
+        entry[:topic_id] = topic_id if topic_id.present?
+        entry
+      end
       result =
         SubmissionService.enqueue_batch(
           entries,
@@ -109,26 +196,7 @@ module DiscourseIndexNow
     private
 
     def filtered_logs
-      scope = SubmissionLog.all
-      scope = scope.where(status: status_value) unless status_value.nil?
-      scope = scope.where("url ILIKE ?", "%#{url_filter}%") if url_filter.present?
-      scope = scope.where(batch_id: batch_id_filter) if batch_id_filter.present?
-      scope
-    end
-
-    def status_value
-      value = params[:status].presence
-      return if value.blank?
-
-      SubmissionLog.statuses[value]
-    end
-
-    def url_filter
-      params[:url].to_s.strip
-    end
-
-    def batch_id_filter
-      params[:batch_id].to_s.strip
+      LogFilter.new(params).apply
     end
 
     def serialize_log(log)
@@ -156,6 +224,7 @@ module DiscourseIndexNow
       {
         enabled: SiteSetting.indexnow_enabled?,
         login_required: SiteSetting.login_required?,
+         time_zone: Time.zone.name,
         api_key: SiteSetting.indexnow_api_key,
         key_accessible: key_accessible,
         key_accessibility_pending: key_accessible.nil?,
@@ -220,37 +289,7 @@ module DiscourseIndexNow
     end
 
     def backfill_topics
-      return Topic.none if SiteSetting.login_required?
-
-      scope =
-        Topic
-          .joins(:category)
-          .where(
-            archetype: Archetype.default,
-            deleted_at: nil,
-            visible: true,
-          )
-          .where(categories: { read_restricted: false })
-          .where.not(category_id: Eligibility.excluded_category_ids)
-
-      excluded_tag_names = Eligibility.excluded_tag_names
-      unless excluded_tag_names.empty?
-        scope =
-          scope.where.not(
-            id: Topic.joins(:tags).where(tags: { name: excluded_tag_names }).select(:id),
-          )
-      end
-
-      scope = scope.where(category_id: params[:category_id]) if params[:category_id].present?
-      scope = scope.where("topics.created_at >= ?", parsed_date(:since)) if params[:since].present?
-      scope = scope.where("topics.created_at <= ?", parsed_date(:until).end_of_day) if params[:until].present?
-      scope.order(:id)
-    end
-
-    def parsed_date(name)
-      Date.parse(params[name])
-    rescue ArgumentError, TypeError
-      raise Discourse::InvalidParameters.new(name)
+      BackfillQuery.new(params).scope
     end
 
     def render_manual_url_error
@@ -286,8 +325,11 @@ module DiscourseIndexNow
     end
 
     def manual_topic_ineligible?(uri)
+      uri.host = Discourse.current_hostname if uri.host.to_s.casecmp?(Discourse.current_hostname.to_s)
       route = Discourse.route_for(uri)
-      return false if route.blank? || route[:topic_id].blank?
+      if route.blank? || route[:topic_id].blank?
+        return uri.path.to_s.start_with?("#{Discourse.base_path}/t/")
+      end
 
       topic = Topic.find_by(id: route[:topic_id])
       topic.blank? || !Eligibility.eligible?(topic)

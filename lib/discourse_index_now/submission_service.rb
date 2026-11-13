@@ -16,6 +16,10 @@ module DiscourseIndexNow
       # higher volume, so it is opt-in and shares the per-topic cooldown.
       unless post.is_first_post?
         return unless SiteSetting.indexnow_submit_on_reply?
+        return if post.deleted_at.present? || post.hidden
+        return if Topic.visible_post_types.exclude?(post.post_type)
+        page = crawler_page_for(post)
+        return if page.nil?
 
         # Submit the crawler page the reply landed on, not the topic's base URL.
         # On a long topic those are different pages and only the former changed.
@@ -23,7 +27,7 @@ module DiscourseIndexNow
           enqueue_topic(
             post.topic,
             trigger_reason: :replied,
-            page: UrlBuilder.page_for(post.post_number),
+            page: page,
           )
         )
       end
@@ -35,10 +39,29 @@ module DiscourseIndexNow
 
     def self.handle_post_edited(post, topic_changed = false)
       return unless SiteSetting.indexnow_enabled?
-      return unless SiteSetting.indexnow_submit_on_edit?
-      return unless post.is_first_post? || topic_changed
 
-      enqueue_topic(post.topic, trigger_reason: :edited)
+      if SiteSetting.indexnow_submit_on_edit? && (post.is_first_post? || topic_changed)
+        enqueue_topic(post.topic, trigger_reason: :edited)
+      end
+
+      return if post.is_first_post? || !SiteSetting.indexnow_submit_on_reply_edit?
+      return if post.deleted_at.present? || post.hidden
+      return if Topic.visible_post_types.exclude?(post.post_type)
+
+      page = crawler_page_for(post)
+      return if page.nil?
+      return if topic_changed && SiteSetting.indexnow_submit_on_edit? && page <= 1
+
+      enqueue_topic(post.topic, trigger_reason: :reply_edited, page: page)
+    end
+
+    def self.crawler_page_for(post)
+      return unless Eligibility.eligible?(post.topic)
+
+      UrlBuilder.page_for(post)
+    rescue Discourse::InvalidAccess, Discourse::NotFound, Discourse::NotLoggedIn
+      # Visibility can change between the eligibility check and TopicView.
+      nil
     end
 
     def self.handle_topic_destroyed(topic)
@@ -60,7 +83,7 @@ module DiscourseIndexNow
       return unless Eligibility.eligible?(topic)
 
       entry = UrlBuilder.build_locale_url(topic, localization.locale)
-      enqueue_batch([entry].compact, trigger_reason: :created)
+      enqueue_batch([entry].compact, topic_id: topic.id, trigger_reason: :created)
     end
 
     def self.handle_topic_changed(topic)
@@ -124,8 +147,10 @@ module DiscourseIndexNow
 
       scope.find_in_batches(batch_size: RESUBMIT_BATCH_SIZE) do |topics|
         entries =
-          topics.filter_map do |topic|
-            { url: topic.url, locale: nil } if Eligibility.eligible?(topic)
+          topics.flat_map do |topic|
+            next [] unless Eligibility.eligible?(topic)
+
+            UrlBuilder.build_urls(topic).map { |entry| entry.merge(topic_id: topic.id) }
           end
         next if entries.blank?
 
@@ -159,11 +184,18 @@ module DiscourseIndexNow
       # that filled up earlier stays capped. That keeps a busy topic to one
       # submission per page per window instead of one per reply.
       entries = build_url_entries(topic, localized: localized, page: page).select do |entry|
-        claim_cooldown(entry[:url])
+        if claim_cooldown(entry[:url])
+          true
+        else
+          schedule_cooldown(topic.id, entry, trigger_reason)
+          false
+        end
       end
       return if entries.blank?
 
-      enqueue_batch(entries, topic_id: topic.id, trigger_reason: trigger_reason)
+      result = enqueue_batch(entries, topic_id: topic.id, trigger_reason: trigger_reason)
+      result[:skipped_entries].each { |entry| schedule_cooldown(topic.id, entry, trigger_reason) }
+      result
     end
 
     def self.enqueue_batch(
@@ -171,7 +203,9 @@ module DiscourseIndexNow
       topic_id: nil,
       source: nil,
       trigger_reason: :created,
-      batch_id: SecureRandom.uuid
+      batch_id: SecureRandom.uuid,
+      batch_index_start: 1,
+      enqueue_jobs: true
     )
       entries =
         Array(entries)
@@ -179,44 +213,49 @@ module DiscourseIndexNow
             if entry.is_a?(String)
               { url: entry, locale: nil }
             elsif entry.respond_to?(:slice)
-              normalized = entry.slice(:url, :locale)
+              normalized = entry.slice(:url, :locale, :topic_id, :retry_of_id, :trigger_reason)
               normalized if normalized[:url].present?
             end
           end
           .uniq { |entry| entry[:url] }
-      return { batch_id: batch_id, submitted_count: 0, job_count: 0 } if entries.blank?
+      return { batch_id: batch_id, submitted_count: 0, job_count: 0, skipped_entries: [] } if entries.blank?
 
-      pending_urls =
-        SubmissionLog
-          .where(status: :pending)
-          .where(url: entries.map { |entry| entry[:url] })
-          .pluck(:url)
-          .to_set
+      active = SubmissionLog.where(status: %i[pending processing retrying])
+      # A deletion notice must survive an earlier in-flight create/edit job.
+      active = active.where(trigger_reason: :deleted) if trigger_reason.to_s == "deleted"
+      pending_urls = active.where(url: entries.map { |entry| entry[:url] }).pluck(:url).to_set
+      skipped_entries = entries.select { |entry| pending_urls.include?(entry[:url]) }
       entries.reject! { |entry| pending_urls.include?(entry[:url]) }
-      return { batch_id: batch_id, submitted_count: 0, job_count: 0 } if entries.blank?
+      if entries.blank?
+        return { batch_id: batch_id, submitted_count: 0, job_count: 0, skipped_entries: skipped_entries }
+      end
 
-      entries
+      result = entries
         .each_slice(BATCH_SIZE)
-        .with_index(1)
+        .with_index(batch_index_start)
         .map do |chunk, batch_index|
           logs =
             chunk.map do |entry|
               SubmissionLog.create!(
                 url: entry[:url],
                 locale: entry[:locale],
+                topic_id: entry[:topic_id] || topic_id,
+                retry_of_id: entry[:retry_of_id],
                 batch_id: batch_id,
                 batch_index: batch_index,
                 status: :pending,
-                trigger_reason: trigger_reason,
+                trigger_reason: entry[:trigger_reason] || trigger_reason,
               )
             end
 
-          Jobs.enqueue(
-            Jobs::DiscourseIndexNow::SubmitBatch,
-            batch_id: batch_id,
-            batch_index: batch_index,
-            topic_id: topic_id,
-          )
+          if enqueue_jobs
+            Jobs.enqueue(
+              Jobs::DiscourseIndexNow::SubmitBatch,
+              batch_id: batch_id,
+              batch_index: batch_index,
+              topic_id: topic_id,
+            )
+          end
 
           { batch_id: batch_id, submitted_count: logs.size, job_count: 1, source: source }
         end
@@ -225,19 +264,43 @@ module DiscourseIndexNow
           result[:job_count] += chunk_result[:job_count]
           result
         end
+      result[:skipped_entries] = skipped_entries
+      result
     end
 
     def self.enqueue_deleted_topic(topic)
       return if SiteSetting.indexnow_api_key.blank?
 
       mark_topic_logs_failed(topic, "topic_destroyed")
-      enqueue_batch(UrlBuilder.build_urls(topic), trigger_reason: :deleted)
+      enqueue_batch(UrlBuilder.build_urls(topic), topic_id: topic.id, trigger_reason: :deleted)
     end
 
     # Keyed on the submitted URL, so each crawler page of a topic cools down
     # independently. Hashed because topic URLs are long and unbounded.
     def self.debounce_key(url)
       "indexnow:debounce:url:#{Digest::SHA256.hexdigest(url.to_s)}"
+    end
+
+    def self.deferred_key(url)
+      "indexnow:deferred:url:#{Digest::SHA256.hexdigest(url.to_s)}"
+    end
+
+    def self.schedule_cooldown(topic_id, entry, trigger_reason)
+      url = entry[:url]
+      delay = [Discourse.redis.ttl(debounce_key(url)).to_i, 1].max
+      return unless Discourse.redis.set(deferred_key(url), "1", nx: true, ex: delay + 1.hour.to_i)
+
+      Jobs.enqueue_in(
+        delay,
+        Jobs::DiscourseIndexNow::FlushCooldown,
+        topic_id: topic_id,
+        url: url,
+        locale: entry[:locale],
+        trigger_reason: trigger_reason.to_s,
+      )
+    rescue StandardError
+      Discourse.redis.del(deferred_key(url)) if url.present?
+      raise
     end
 
     # Shortest gap between automatic submissions of the same URL. Every automatic
@@ -289,7 +352,7 @@ module DiscourseIndexNow
         values = batch.flat_map { |url| [url, "#{url}?%"] }
 
         SubmissionLog
-          .where(status: :pending)
+          .where(status: %i[pending retrying])
           .where(where_clause, *values)
           .update_all(
             status: SubmissionLog.statuses[:failed],

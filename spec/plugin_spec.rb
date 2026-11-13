@@ -28,6 +28,15 @@ describe ::DiscourseIndexNow do
     expect(SiteSetting.indexnow_enabled).to eq(false)
   end
 
+  it "wakes paused work when the hourly limit is raised" do
+    SiteSetting.indexnow_hourly_limit = 0
+    allow(Jobs).to receive(:enqueue)
+
+    SiteSetting.indexnow_hourly_limit = 10
+
+    expect(Jobs).to have_received(:enqueue).with(Jobs::DiscourseIndexNow::ResumeQueued)
+  end
+
   it "listens for category changes on a topic" do
     allow(DiscourseIndexNow::SubmissionService).to receive(:handle_topic_changed)
     DiscourseEvent.trigger(:topic_category_changed, topic, category)
@@ -75,9 +84,14 @@ describe ::DiscourseIndexNow do
   it "publishes the finalized plugin metadata" do
     header = File.read(Rails.root.join("plugins/discourse-indexnow/plugin.rb"))
 
-    expect(header).to include("# version: 0.2.2")
+    expect(header).to include("# version: 0.3.0")
     expect(header).to include("# authors: sitetalk.net")
     expect(header).to include("# url: https://github.com/imlotso/discourse-indexnow")
+  end
+
+  it "keeps reply edit submissions and automatic log deletion disabled by default" do
+    expect(SiteSetting.indexnow_submit_on_reply_edit?).to eq(false)
+    expect(SiteSetting.indexnow_log_retention_days).to eq(0)
   end
 
   MAIN_BUNDLE = "plugins/discourse-indexnow/assets/javascripts/discourse"
@@ -197,6 +211,22 @@ describe ::DiscourseIndexNow do
 
       expect(translations.keys).to include(*referenced), "missing #{locale} keys: " \
         "#{(referenced - translations.keys).join(', ')}"
+    end
+  end
+
+  it "keeps the English and simplified Chinese translation keys in sync" do
+    root = Rails.root.join("plugins/discourse-indexnow/config/locales")
+    flatten_keys = lambda do |values, prefix = []|
+      values.flat_map do |key, value|
+        path = prefix + [key.to_s]
+        value.is_a?(Hash) ? flatten_keys.call(value, path) : [path.join(".")]
+      end
+    end
+
+    %w[client server].each do |scope|
+      english = YAML.load_file(root.join("#{scope}.en.yml")).fetch("en")
+      chinese = YAML.load_file(root.join("#{scope}.zh_CN.yml")).fetch("zh_CN")
+      expect(flatten_keys.call(chinese)).to match_array(flatten_keys.call(english))
     end
   end
 end

@@ -24,15 +24,61 @@ module DiscourseIndexNow
     HOURLY_PREFIX = "indexnow:rate:h"
     DAILY_PREFIX = "indexnow:rate:d"
 
+    # The window check and the reservation must be one Redis operation: two
+    # Sidekiq workers can otherwise spend the same remaining quota.
+    RESERVE_SCRIPT = <<~LUA
+      local now = tonumber(ARGV[1])
+      local hourly_limit = tonumber(ARGV[2])
+      local daily_limit = tonumber(ARGV[3])
+      local requested = tonumber(ARGV[4])
+      local hourly_count = tonumber(ARGV[5])
+      local hourly_ttl = tonumber(ARGV[6])
+      local daily_ttl = tonumber(ARGV[7])
+      local blocked_until = tonumber(redis.call('GET', KEYS[1]) or '0')
+      if blocked_until > now or hourly_limit <= 0 or daily_limit <= 0 or requested <= 0 then
+        return 0
+      end
+
+      local hourly_used = 0
+      local daily_used = 0
+      for i = 2, hourly_count + 1 do
+        hourly_used = hourly_used + tonumber(redis.call('GET', KEYS[i]) or '0')
+      end
+      for i = hourly_count + 2, #KEYS do
+        daily_used = daily_used + tonumber(redis.call('GET', KEYS[i]) or '0')
+      end
+
+      local granted = math.max(0, math.min(requested, hourly_limit - hourly_used, daily_limit - daily_used))
+      if granted > 0 then
+        redis.call('INCRBY', KEYS[hourly_count + 1], granted)
+        redis.call('EXPIRE', KEYS[hourly_count + 1], hourly_ttl)
+        redis.call('INCRBY', KEYS[#KEYS], granted)
+        redis.call('EXPIRE', KEYS[#KEYS], daily_ttl)
+      end
+      return granted
+    LUA
+
+    EXTEND_THROTTLE_SCRIPT = <<~LUA
+      local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+      local requested = tonumber(ARGV[1])
+      if requested > current then
+        redis.call('SET', KEYS[1], requested)
+        return requested
+      end
+      return current
+    LUA
+
     class << self
       def throttled?
         Time.zone.now.to_i < Discourse.redis.get(THROTTLE_UNTIL_KEY).to_i
       end
 
       def throttle_until!(timestamp)
-        current = Discourse.redis.get(THROTTLE_UNTIL_KEY).to_i
-        timestamp = timestamp.to_i
-        Discourse.redis.set(THROTTLE_UNTIL_KEY, timestamp) if timestamp > current
+        Discourse.redis.eval(
+          EXTEND_THROTTLE_SCRIPT,
+          keys: [Discourse.redis.namespace_key(THROTTLE_UNTIL_KEY)],
+          argv: [timestamp.to_i],
+        )
       end
 
       def retry_delay
@@ -55,6 +101,30 @@ module DiscourseIndexNow
         return 0 if hourly_limit <= 0 || daily_limit <= 0
 
         [hourly_limit - hourly_used(now), daily_limit - daily_used(now)].min
+      end
+
+      # Count outbound attempts before sending, even if their response fails or
+      # times out. A worker that crashes cannot spend the same allowance twice.
+      def reserve!(url_count, now = Time.zone.now)
+        hourly_keys = window_keys(HOURLY_PREFIX, HOURLY_BUCKET_SECONDS, HOURLY_WINDOW_SECONDS, now)
+        daily_keys = window_keys(DAILY_PREFIX, DAILY_BUCKET_SECONDS, DAILY_WINDOW_SECONDS, now)
+        keys = [THROTTLE_UNTIL_KEY, *hourly_keys, *daily_keys].map do |key|
+          Discourse.redis.namespace_key(key)
+        end
+
+        Discourse.redis.eval(
+          RESERVE_SCRIPT,
+          keys: keys,
+          argv: [
+            now.to_i,
+            SiteSetting.indexnow_hourly_limit.to_i,
+            SiteSetting.indexnow_daily_limit.to_i,
+            url_count.to_i,
+            hourly_keys.size,
+            HOURLY_WINDOW_SECONDS + HOURLY_BUCKET_SECONDS,
+            DAILY_WINDOW_SECONDS + DAILY_BUCKET_SECONDS,
+          ],
+        ).to_i
       end
 
       def hourly_used(now = Time.zone.now)

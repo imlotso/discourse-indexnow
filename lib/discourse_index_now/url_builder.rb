@@ -15,7 +15,12 @@ module DiscourseIndexNow
       urls = [{ url: base, locale: nil }]
       return urls unless ::ContentLocalization.crawler_locale_param_enabled?
 
-      locales = topic.localizations.order(:locale).pluck(:locale).uniq
+      locales =
+        if topic.association(:localizations).loaded?
+          topic.localizations.map(&:locale).compact.uniq.sort
+        else
+          topic.localizations.order(:locale).pluck(:locale).compact.uniq
+        end
 
       locales.each do |locale|
         urls << { url: locale_url(base, locale), locale: locale }
@@ -31,12 +36,20 @@ module DiscourseIndexNow
       { url: locale_url(page_url(topic, page), locale), locale: locale }
     end
 
-    # Which crawler page a post number falls on. Mirrors TopicView#calculate_page
-    # (((count - 1) / chunk_size) + 1); post_number stands in for the count, which
-    # is what TopicView itself does on mega topics -- exactly the long threads
-    # where this matters.
-    def self.page_for(post_number)
-      number = post_number.to_i
+    # Ask Discourse's anonymous view, which accounts for invisible and deleted
+    # posts and uses the core approximation only for mega topics.
+    def self.page_for(post_or_number)
+      if post_or_number.respond_to?(:topic) && post_or_number.respond_to?(:post_number)
+        return ::TopicView.new(
+          post_or_number.topic,
+          nil,
+          post_number: post_or_number.post_number,
+          skip_post_loading: true,
+        ).page
+      end
+
+      # Preserve the numerical helper for existing callers.
+      number = post_or_number.to_i
       return 1 if number < 1
 
       ((number - 1) / ::TopicView.chunk_size) + 1

@@ -16,5 +16,11 @@ export default class AdminPluginsShowDiscourseIndexNowLogs extends DiscourseRout
       model,
       data: model,
     });
+    controller.resumeBatchPolling();
+  }
+
+  deactivate() {
+    this.controller?.stopBatchPolling();
+    super.deactivate(...arguments);
   }
 }

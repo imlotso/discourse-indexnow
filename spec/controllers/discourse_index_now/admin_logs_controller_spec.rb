@@ -97,6 +97,31 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
       expect(json["logs"].map { |log| log["url"] }).to all(include("one"))
     end
 
+    it "combines reason, response code, locale, and date filters" do
+      match = DiscourseIndexNow::SubmissionLog.create!(
+        url: topic.url,
+        status: :failed,
+        trigger_reason: :edited,
+        response_code: 403,
+        locale: "es",
+        created_at: Time.zone.parse("2026-01-12 12:00"),
+      )
+      DiscourseIndexNow::SubmissionLog.create!(
+        url: topic.url,
+        status: :failed,
+        trigger_reason: :created,
+        response_code: 429,
+        locale: "en",
+        created_at: Time.zone.parse("2026-01-12 12:00"),
+      )
+
+      get "/admin/plugins/discourse-indexnow/logs.json",
+          params: { trigger_reason: "edited", response_code: "403", locale: "es", since: "2026-01-12", until: "2026-01-12" }
+
+      expect(response.status).to eq(200)
+      expect(response.parsed_body["logs"].map { |log| log["id"] }).to eq([match.id])
+    end
+
     it "returns a seven day trend and failure breakdown" do
       freeze_time(2.days.ago) do
         DiscourseIndexNow::SubmissionLog.create!(
@@ -198,6 +223,32 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
   end
 
   describe "#destroy_filtered" do
+    it "does not delete logs when a status filter is invalid" do
+      log = DiscourseIndexNow::SubmissionLog.create!(url: topic.url, status: :success)
+
+      delete "/admin/plugins/discourse-indexnow/logs.json", params: { status: "not-a-status" }
+
+      expect(response.status).to eq(400)
+      expect(DiscourseIndexNow::SubmissionLog.exists?(log.id)).to be(true)
+    end
+
+    it "rejects other invalid filters rather than widening a delete" do
+      log = DiscourseIndexNow::SubmissionLog.create!(url: topic.url, status: :success)
+      invalid_filters = [
+        { trigger_reason: "unknown" },
+        { response_code: "999" },
+        { since: "not-a-date" },
+        { since: "2026-01-02", until: "2026-01-01" },
+        { locale: "x" * 21 },
+      ]
+
+      invalid_filters.each do |filters|
+        delete "/admin/plugins/discourse-indexnow/logs.json", params: filters
+        expect(response.status).to eq(400)
+        expect(DiscourseIndexNow::SubmissionLog.exists?(log.id)).to eq(true)
+      end
+    end
+
     it "deletes only logs matching the current filters" do
       retained =
         DiscourseIndexNow::SubmissionLog.create!(
@@ -268,9 +319,23 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
   end
 
   describe "#backfill" do
+    it "retains the legacy endpoint's accepted date formats" do
+      allow(DiscourseIndexNow::SubmissionService).to receive(:enqueue_batch).and_return(
+        batch_id: "legacy",
+        submitted_count: 1,
+        job_count: 1,
+      )
+
+      post "/admin/plugins/discourse-indexnow/backfill.json",
+           params: { category_id: category.id, since: "January 1, 2020" }
+
+      expect(response.status).to eq(200)
+      expect(response.parsed_body["matched_topics"]).to eq(1)
+    end
+
     it "submits the selected URLs through the generic batch service" do
       allow(DiscourseIndexNow::SubmissionService).to receive(:enqueue_batch).with(
-        [{ url: topic.url, locale: nil }],
+        [{ url: topic.url, locale: nil, topic_id: topic.id }],
         source: "backfill",
         trigger_reason: :backfill,
       ).and_return(batch_id: "batch-1", submitted_count: 1, job_count: 1, source: "backfill")
@@ -288,7 +353,7 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
       expect(json["submitted_urls"]).to eq(1)
       expect(json["batch_id"]).to eq("batch-1")
       expect(DiscourseIndexNow::SubmissionService).to have_received(:enqueue_batch).with(
-        [{ url: topic.url, locale: nil }],
+        [{ url: topic.url, locale: nil, topic_id: topic.id }],
         source: "backfill",
         trigger_reason: :backfill,
       )
@@ -298,7 +363,7 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
   describe "#submit_urls" do
     it "submits valid on-site topic URLs through the generic batch service" do
       allow(DiscourseIndexNow::SubmissionService).to receive(:enqueue_batch).with(
-        [{ url: topic.url, locale: nil }],
+        [{ url: topic.url, locale: nil, topic_id: topic.id }],
         source: "manual",
         trigger_reason: :manual,
       ).and_return(batch_id: "batch-manual-1", submitted_count: 1, job_count: 1, source: "manual")
@@ -310,7 +375,7 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
       expect(json["submitted_urls"]).to eq(1)
       expect(json["batch_id"]).to eq("batch-manual-1")
       expect(DiscourseIndexNow::SubmissionService).to have_received(:enqueue_batch).with(
-        [{ url: topic.url, locale: nil }],
+        [{ url: topic.url, locale: nil, topic_id: topic.id }],
         source: "manual",
         trigger_reason: :manual,
       )
@@ -331,6 +396,14 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
       expect(response.parsed_body["errors"]).to be_present
     end
 
+    it "rejects an unrecognised topic-looking URL" do
+      post "/admin/plugins/discourse-indexnow/submit_urls.json",
+           params: { urls: "#{Discourse.base_url}/t/not-a-topic" }
+
+      expect(response.status).to eq(422)
+      expect(DiscourseIndexNow::SubmissionLog.count).to eq(0)
+    end
+
     it "rejects empty input explicitly" do
       post "/admin/plugins/discourse-indexnow/submit_urls.json", params: { urls: "\n" }
 
@@ -349,7 +422,7 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
 
     it "deduplicates repeated URLs while preserving order" do
       allow(DiscourseIndexNow::SubmissionService).to receive(:enqueue_batch).with(
-        [{ url: topic.url, locale: nil }],
+        [{ url: topic.url, locale: nil, topic_id: topic.id }],
         source: "manual",
         trigger_reason: :manual,
       ).and_return(batch_id: "batch-manual-2", submitted_count: 1, job_count: 1, source: "manual")
@@ -361,7 +434,7 @@ describe DiscourseIndexNow::AdminLogsController, type: :request do
 
       expect(response.status).to eq(200)
       expect(DiscourseIndexNow::SubmissionService).to have_received(:enqueue_batch).with(
-        [{ url: topic.url, locale: nil }],
+        [{ url: topic.url, locale: nil, topic_id: topic.id }],
         source: "manual",
         trigger_reason: :manual,
       )
