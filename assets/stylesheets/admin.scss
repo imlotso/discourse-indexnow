@@ -1,5 +1,8 @@
+@use "lib/viewport";
+
 .indexnow-admin {
   display: grid;
+  min-width: 0;
   grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
 }
@@ -15,12 +18,17 @@
 
   code {
     margin-left: 0.35rem;
+    overflow-wrap: anywhere;
+  }
+
+  > div {
+    min-width: 0;
   }
 }
 
-.indexnow-controls,
+.indexnow-backfill-actions,
+.indexnow-filter-actions,
 .indexnow-status-filters,
-.indexnow-url-search,
 .indexnow-pagination,
 .indexnow-chart-legend {
   display: flex;
@@ -35,10 +43,9 @@
     minmax(11rem, 1.4fr)
     minmax(9rem, 1fr)
     minmax(9rem, 1fr)
-    auto
     auto;
   gap: 0.5rem;
-  align-items: center;
+  align-items: end;
 }
 
 .indexnow-backfill-controls > * {
@@ -57,16 +64,58 @@
   min-width: 0;
 }
 
+.indexnow-field {
+  label {
+    margin: 0;
+  }
+
+  input,
+  select,
+  .d-date-input {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    margin: 0;
+  }
+
+  input,
+  select {
+    min-height: 2.5rem;
+  }
+}
+
 .indexnow-url-search {
   display: grid;
   width: 100%;
-  grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+  gap: 0.75rem;
   align-items: end;
 }
 
-@media (width <= 700px) {
+.indexnow-backfill-actions .btn {
+  min-height: 2.5rem;
+}
+
+@include viewport.until(lg) {
+  .indexnow-backfill-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .indexnow-backfill-controls > .indexnow-field:first-child,
+  .indexnow-backfill-actions {
+    grid-column: 1 / -1;
+  }
+}
+
+@include viewport.until(md) {
   .indexnow-backfill-controls {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .indexnow-backfill-actions .btn,
+  .indexnow-filter-actions .btn {
+    flex: 1 1 100%;
+    min-height: 2.75rem;
   }
 }
 
@@ -168,6 +217,7 @@
 
 .indexnow-trend-label {
   font-size: 10px;
+  fill: var(--primary-high);
 }
 
 @media (width <= 700px) {
@@ -208,7 +258,7 @@
 
 .indexnow-failure-row {
   display: grid;
-  grid-template-columns: 8rem 6rem 1fr;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.5rem;
   margin-bottom: 0.4rem;
@@ -220,6 +270,8 @@
 }
 
 .indexnow-failure-track {
+  grid-column: 1 / -1;
+  min-width: 0;
   width: 100%;
   height: 0.5rem;
   background: var(--primary-low);
@@ -267,15 +319,6 @@
   gap: 0.75rem;
 }
 
-.indexnow-backfill select,
-.indexnow-backfill input {
-  padding: 0.35rem;
-  border: 1px solid var(--primary-low);
-  border-radius: 0.25rem;
-  background: var(--secondary);
-  color: var(--primary);
-}
-
 .indexnow-backfill-result {
   font-size: var(--font-down-1);
   color: var(--primary-high);
@@ -284,11 +327,8 @@
 .indexnow-manual textarea {
   width: 100%;
   min-height: 6rem;
-  padding: 0.5rem;
-  border: 1px solid var(--primary-low);
-  border-radius: 0.25rem;
-  background: var(--secondary);
-  color: var(--primary);
+  box-sizing: border-box;
+  margin: 0;
 }
 
 .indexnow-manual-controls {
@@ -302,18 +342,85 @@
 }
 
 .indexnow-controls {
-  justify-content: space-between;
+  display: grid;
+  min-width: 0;
+  gap: 1rem;
+}
+
+.indexnow-batch-progress,
+.indexnow-manual-result {
+  overflow-wrap: anywhere;
+}
+
+.indexnow-log-table-container {
+  min-width: 0;
+  overflow-x: auto;
+
+  &:focus-visible {
+    outline: 2px solid var(--tertiary);
+    outline-offset: 2px;
+  }
 }
 
 .indexnow-log-table {
   width: 100%;
-  overflow-wrap: anywhere;
 
   td,
   th {
     padding: 0.5rem;
     text-align: left;
     vertical-align: top;
+  }
+
+  th {
+    white-space: nowrap;
+  }
+
+  .indexnow-log-value {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  @include viewport.from(md) {
+    min-width: 64rem;
+
+    .--overview {
+      width: 25%;
+      min-width: 14rem;
+    }
+
+    .indexnow-log-status {
+      min-width: 8rem;
+    }
+
+    .indexnow-log-error {
+      min-width: 10rem;
+    }
+
+    .indexnow-log-batch {
+      min-width: 10rem;
+    }
+
+    .indexnow-log-compact {
+      white-space: nowrap;
+    }
+  }
+
+  @include viewport.until(md) {
+    .d-table__cell.--detail {
+      display: grid;
+      grid-template-columns: minmax(0, 0.4fr) minmax(0, 1fr);
+      gap: 0.75rem;
+    }
+
+    .d-table__cell.--controls {
+      position: static;
+      text-align: left;
+
+      &.--empty {
+        display: none;
+      }
+    }
   }
 }
 

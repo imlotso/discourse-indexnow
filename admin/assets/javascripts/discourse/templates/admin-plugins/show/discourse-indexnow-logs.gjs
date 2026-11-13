@@ -218,17 +218,20 @@ export default <template>
           />
         </div>
 
-        <DButton
-          @action={{@controller.previewBackfill}}
-          @disabled={{@controller.backfillLoading}}
-          @label="discourse_index_now.admin.preview"
-        />
-        <DButton
-          class="indexnow-submit-backfill"
-          @action={{@controller.submitBackfill}}
-          @disabled={{@controller.backfillLoading}}
-          @label="discourse_index_now.admin.submit_backfill"
-        />
+        <div class="indexnow-backfill-actions">
+          <DButton
+            class="btn-default"
+            @action={{@controller.previewBackfill}}
+            @disabled={{@controller.backfillLoading}}
+            @label="discourse_index_now.admin.preview"
+          />
+          <DButton
+            class="btn-primary indexnow-submit-backfill"
+            @action={{@controller.submitBackfill}}
+            @disabled={{@controller.backfillLoading}}
+            @label="discourse_index_now.admin.submit_backfill"
+          />
+        </div>
       </div>
 
       {{#if @controller.backfillPreview}}
@@ -278,6 +281,7 @@ export default <template>
       />
       <div class="indexnow-manual-controls">
         <DButton
+          class="btn-primary"
           @action={{@controller.submitManualUrls}}
           @disabled={{@controller.manualLoading}}
           @label="discourse_index_now.admin.submit_manual"
@@ -298,7 +302,7 @@ export default <template>
       <div class="indexnow-status-filters">
         {{#each @controller.statusFilters as |filter|}}
           <DButton
-            class={{if filter.selected "btn-primary" ""}}
+            class={{if filter.selected "btn-primary" "btn-default"}}
             @action={{fn @controller.setStatus filter.value}}
             @ariaPressed={{filter.selected}}
             @label={{filter.label}}
@@ -327,12 +331,6 @@ export default <template>
             @onChange={{@controller.updateBatchId}}
             @placeholderKey="discourse_index_now.admin.batch_placeholder"
             @value={{@controller.batchId}}
-          />
-          <DButton
-            class="indexnow-view-batch"
-            @action={{@controller.viewBatchProgress}}
-            @disabled={{@controller.batchIdEmpty}}
-            @label="discourse_index_now.admin.view_batch_progress"
           />
         </div>
         <div class="indexnow-field">
@@ -393,24 +391,34 @@ export default <template>
             @onChange={{@controller.setLogUntil}}
           />
         </div>
+      </div>
+      <div class="indexnow-filter-actions">
         <DButton
-          class="indexnow-search-button"
+          class="btn-primary indexnow-search-button"
           @action={{@controller.search}}
           @disabled={{@controller.loading}}
           @label="discourse_index_now.admin.search"
         />
         <DButton
-          class="indexnow-retry-filtered"
+          class="btn-default indexnow-view-batch"
+          @action={{@controller.viewBatchProgress}}
+          @disabled={{@controller.batchIdEmpty}}
+          @label="discourse_index_now.admin.view_batch_progress"
+        />
+        <DButton
+          class="btn-default indexnow-retry-filtered"
           @action={{@controller.retryFailed}}
           @disabled={{@controller.retryLoading}}
           @label="discourse_index_now.admin.retry_filtered"
         />
         <DButton
+          class="btn-default"
           @action={{@controller.cancelPending}}
           @disabled={{@controller.loading}}
           @label="discourse_index_now.admin.cancel_pending"
         />
         <DButton
+          class="btn-danger"
           @action={{@controller.deleteLogs}}
           @disabled={{@controller.loading}}
           @label="discourse_index_now.admin.delete_logs"
@@ -420,78 +428,97 @@ export default <template>
 
     <DConditionalLoadingSpinner @condition={{@controller.loading}} />
 
-    <table class="d-table indexnow-log-table">
-      <thead class="d-table__header">
-        <tr class="d-table__row">
-          <th>{{i18n "discourse_index_now.admin.url"}}</th>
-          <th>{{i18n "discourse_index_now.admin.locale"}}</th>
-          <th>{{i18n "discourse_index_now.admin.status"}}</th>
-          <th>{{i18n "discourse_index_now.admin.trigger_reason"}}</th>
-          <th>{{i18n "discourse_index_now.admin.response_code"}}</th>
-          <th>{{i18n "discourse_index_now.admin.error_message"}}</th>
-          <th>{{i18n "discourse_index_now.admin.batch"}}</th>
-          <th>{{i18n "discourse_index_now.admin.created_at"}}</th>
-          <th>{{i18n "discourse_index_now.admin.actions"}}</th>
-        </tr>
-      </thead>
-      <tbody class="d-table__body">
-        {{#each @controller.logs as |entry|}}
+    <div
+      aria-label={{i18n "discourse_index_now.admin.logs"}}
+      class="indexnow-log-table-container"
+      role="region"
+      tabindex="0"
+    >
+      <table class="d-table indexnow-log-table">
+        <thead class="d-table__header">
           <tr class="d-table__row">
-            <td class="d-table__cell --overview">{{entry.url}}</td>
-            <td class="d-table__cell --detail"><div
-                class="d-table__mobile-label"
-              >{{i18n "discourse_index_now.admin.locale"}}</div>{{if
-                entry.locale
-                entry.locale
-                "-"
-              }}</td>
-            <td class="d-table__cell --detail"><div
-                class="d-table__mobile-label"
-              >{{i18n "discourse_index_now.admin.status"}}</div><span
-                class="indexnow-status-{{entry.status}}"
-              >{{entry.status_label}}</span></td>
-            <td class="d-table__cell --detail"><div
-                class="d-table__mobile-label"
-              >{{i18n
-                  "discourse_index_now.admin.trigger_reason"
-                }}</div>{{entry.trigger_reason_label}}</td>
-            <td class="d-table__cell --detail"><div
-                class="d-table__mobile-label"
-              >{{i18n
-                  "discourse_index_now.admin.response_code"
-                }}</div>{{entry.response_code}}</td>
-            <td class="d-table__cell --detail"><div
-                class="d-table__mobile-label"
-              >{{i18n
-                  "discourse_index_now.admin.error_message"
-                }}</div>{{entry.error_message}}</td>
-            <td class="d-table__cell --detail"><div
-                class="d-table__mobile-label"
-              >{{i18n "discourse_index_now.admin.batch"}}</div><code
-              >{{entry.batch_id}}</code></td>
-            <td class="d-table__cell --detail"><div
-                class="d-table__mobile-label"
-              >{{i18n
-                  "discourse_index_now.admin.created_at"
-                }}</div>{{dAgeWithTooltip entry.created_at}}</td>
-            <td class="d-table__cell --controls">
-              {{#if entry.can_retry}}
-                <DButton
-                  class="indexnow-retry-one"
-                  @action={{fn @controller.retryOne entry.id}}
-                  @disabled={{@controller.retryLoading}}
-                  @label="discourse_index_now.admin.retry_one"
-                />
-              {{/if}}
-            </td>
+            <th scope="col">{{i18n "discourse_index_now.admin.url"}}</th>
+            <th scope="col">{{i18n "discourse_index_now.admin.locale"}}</th>
+            <th scope="col">{{i18n "discourse_index_now.admin.status"}}</th>
+            <th scope="col">{{i18n
+                "discourse_index_now.admin.trigger_reason"
+              }}</th>
+            <th scope="col">{{i18n
+                "discourse_index_now.admin.response_code"
+              }}</th>
+            <th scope="col">{{i18n
+                "discourse_index_now.admin.error_message"
+              }}</th>
+            <th scope="col">{{i18n "discourse_index_now.admin.batch"}}</th>
+            <th scope="col">{{i18n "discourse_index_now.admin.created_at"}}</th>
+            <th scope="col">{{i18n "discourse_index_now.admin.actions"}}</th>
           </tr>
-        {{else}}
-          <tr>
-            <td colspan="9">{{i18n "discourse_index_now.admin.no_logs"}}</td>
-          </tr>
-        {{/each}}
-      </tbody>
-    </table>
+        </thead>
+        <tbody class="d-table__body">
+          {{#each @controller.logs as |entry|}}
+            <tr class="d-table__row">
+              <td class="d-table__cell --overview"><span
+                  class="indexnow-log-value"
+                >{{entry.url}}</span></td>
+              <td class="d-table__cell --detail indexnow-log-compact"><div
+                  class="d-table__mobile-label"
+                >{{i18n "discourse_index_now.admin.locale"}}</div><span
+                  class="indexnow-log-value"
+                >{{if entry.locale entry.locale "-"}}</span></td>
+              <td class="d-table__cell --detail indexnow-log-status"><div
+                  class="d-table__mobile-label"
+                >{{i18n "discourse_index_now.admin.status"}}</div><span
+                  class="indexnow-log-value indexnow-status-{{entry.status}}"
+                >{{entry.status_label}}</span></td>
+              <td class="d-table__cell --detail indexnow-log-compact"><div
+                  class="d-table__mobile-label"
+                >{{i18n "discourse_index_now.admin.trigger_reason"}}</div><span
+                  class="indexnow-log-value"
+                >{{entry.trigger_reason_label}}</span></td>
+              <td class="d-table__cell --detail indexnow-log-compact"><div
+                  class="d-table__mobile-label"
+                >{{i18n "discourse_index_now.admin.response_code"}}</div><span
+                  class="indexnow-log-value"
+                >{{entry.response_code}}</span></td>
+              <td class="d-table__cell --detail indexnow-log-error"><div
+                  class="d-table__mobile-label"
+                >{{i18n "discourse_index_now.admin.error_message"}}</div><span
+                  class="indexnow-log-value"
+                >{{entry.error_message}}</span></td>
+              <td class="d-table__cell --detail indexnow-log-batch"><div
+                  class="d-table__mobile-label"
+                >{{i18n "discourse_index_now.admin.batch"}}</div><code
+                  class="indexnow-log-value"
+                >{{entry.batch_id}}</code></td>
+              <td class="d-table__cell --detail indexnow-log-compact"><div
+                  class="d-table__mobile-label"
+                >{{i18n "discourse_index_now.admin.created_at"}}</div><span
+                  class="indexnow-log-value"
+                >{{dAgeWithTooltip entry.created_at}}</span></td>
+              <td
+                class="d-table__cell --controls
+                  {{unless entry.can_retry '--empty'}}"
+              >
+                {{#if entry.can_retry}}
+                  <DButton
+                    class="btn-default indexnow-retry-one"
+                    @action={{fn @controller.retryOne entry.id}}
+                    @disabled={{@controller.retryLoading}}
+                    @label="discourse_index_now.admin.retry_one"
+                  />
+                {{/if}}
+              </td>
+            </tr>
+          {{else}}
+            <tr class="d-table__row">
+              <td class="d-table__cell" colspan="9">{{i18n
+                  "discourse_index_now.admin.no_logs"
+                }}</td>
+            </tr>
+          {{/each}}
+        </tbody>
+      </table>
+    </div>
 
     <div class="indexnow-pagination">
       <DButton

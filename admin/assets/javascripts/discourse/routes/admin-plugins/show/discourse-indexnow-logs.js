@@ -4,10 +4,7 @@ import DiscourseRoute from "discourse/routes/discourse";
 export default class AdminPluginsShowDiscourseIndexNowLogs extends DiscourseRoute {
   model() {
     return ajax("/admin/plugins/discourse-indexnow/logs.json", {
-      data: {
-        page: 1,
-        per_page: 50,
-      },
+      data: this.controllerFor(this.routeName).logRequestParams,
     });
   }
 
